@@ -4,7 +4,23 @@ version = "0.2.0"
 edition = "2024"
 
 [dependencies]
-bevy = "0.19.1"
+bevy = { version = "0.19.1", default-features = false, features = [
+    "multi_threaded",     # Пул потоков AsyncComputeTaskPool
+    "bevy_log",           # Макросы логирования info!, warn!, error!, debug!
+    "serialize",          # Поддержка Serialize/Deserialize для Vec2/Vec3 в сохранениях
+    "bevy_asset",         # Хранилище Assets<Mesh> и Assets<StandardMaterial>
+    "bevy_winit",         # Создание окна и обработка мыши/клавиатуры
+    "bevy_core_pipeline", # Базовый пайплайн камеры Camera3d
+    "bevy_render",        # Ядро рендера wgpu
+    "bevy_pbr",           # 3D-меши (Mesh3d), материалы (StandardMaterial) и свет (DirectionalLight)
+    "bevy_gizmos",        # 3D-стрелки ветров, течений и ось планеты
+    "bevy_state",         # Стейт-машина AppState (MainMenu / InGame)
+    "tonemapping_luts",   # Стандартный тонмаппинг для 3D-сцены (чтобы цвета не искажались)
+    "ktx2",               # Нужен для загрузки LUT-текстур тонмаппинга
+    "zstd_rust",          # Распаковка ktx2 для тонмаппинга
+    "x11",                # Поддержка окон на Linux (X11)
+    "wayland",            # Поддержка окон на Linux (Wayland)
+] }
 bevy_egui = "0.41.1"
 noise = "0.9"
 rand = "0.10.3"
@@ -26,8 +42,9 @@ lto = "thin"
 codegen-units = 16
 
 [profile.dev.package."*"]
-opt-level = 3
+opt-level = 2
+debug = false
 
 [profile.dev]
-opt-level = 0
+opt-level = 1
 debug = "line-tables-only"

@@ -21,6 +21,11 @@ default:
 dev *args:
     cargo run --features bevy/dynamic_linking -- {{args}}
 
+# Щадящая сборка и запуск для ПК с малым объемом ОЗУ (ограничение до 4 потоков)
+[group('dev')]
+dev-low-mem *args:
+    cargo run --features bevy/dynamic_linking -j 4 -- {{args}}
+
 # Стандартный запуск отладочной сборки (debug)
 [group('dev')]
 run *args:
