@@ -42,6 +42,7 @@ pub fn build_globe_mesh(
     flatten_water: bool,
     cell_colors: &[[f32; 4]],
     radius: f32,
+    height_scale: f32,
 ) -> Mesh {
     let (vertex_capacity, index_capacity) = globe_mesh_sizes(topology, elevations);
     let mut positions: Vec<[f32; 3]> = Vec::with_capacity(vertex_capacity);
@@ -56,7 +57,7 @@ pub fn build_globe_mesh(
         } else {
             real_h
         };
-        let r = radius + render_h;
+        let r = radius + render_h * height_scale;
         let top_color = cell_colors[cell_id];
         let top_normal = cell.center.to_array();
 
@@ -94,7 +95,7 @@ pub fn build_globe_mesh(
                 } else {
                     real_neighbor_h
                 };
-                let r_bottom = radius + render_neighbor_h;
+                let r_bottom = radius + render_neighbor_h * height_scale;
 
                 let c1 = cell.corners[k];
                 let c2 = cell.corners[(k + 1) % n_corners];
@@ -186,9 +187,10 @@ pub fn recolor_globe_mesh(
 
 pub fn reposition_globe_mesh(
     topology: &WorldTopology,
-    real_elevations: &[f32], // Реальные высоты (нужны, чтобы условие стен совпало!)
-    flatten_water: bool,     // Выравнивать ли воду
+    real_elevations: &[f32],
+    flatten_water: bool,
     radius: f32,
+    height_scale: f32,
 ) -> Vec<[f32; 3]> {
     let (vertex_capacity, _) = globe_mesh_sizes(topology, real_elevations);
     let mut positions: Vec<[f32; 3]> = Vec::with_capacity(vertex_capacity);
@@ -200,7 +202,7 @@ pub fn reposition_globe_mesh(
         } else {
             real_h
         };
-        let r = radius + render_h;
+        let r = radius + render_h * height_scale;
 
         // Центр и углы
         positions.push((cell.center * r).to_array());
@@ -220,7 +222,7 @@ pub fn reposition_globe_mesh(
                 } else {
                     real_neighbor_h
                 };
-                let r_bottom = radius + render_neighbor_h;
+                let r_bottom = radius + render_neighbor_h * height_scale;
 
                 let c1 = cell.corners[k];
                 let c2 = cell.corners[(k + 1) % n_corners];
@@ -245,6 +247,7 @@ pub fn build_river_mesh(
     config: &HydrologyConfig,
     flatten_water: bool,
     radius: f32,
+    height_scale: f32,
 ) -> Mesh {
     let mut positions: Vec<[f32; 3]> = Vec::new();
     let mut normals: Vec<[f32; 3]> = Vec::new();
@@ -306,7 +309,7 @@ pub fn build_river_mesh(
         } else {
             real_h
         };
-        let r_top = radius + render_h;
+       let r_top = radius + render_h * height_scale;
         let up_normal = cell.center;
         let lift_vec = up_normal * surface_lift;
 
@@ -440,7 +443,7 @@ pub fn build_river_mesh(
             } else {
                 real_nbr_h
             };
-            let r_bot = radius + render_nbr_h;
+            let r_bot = radius + render_nbr_h * height_scale;
 
             if r_top > r_bot + 1e-5 {
                 let edge_dir = (out_c2 - out_c1).normalize_or_zero();
