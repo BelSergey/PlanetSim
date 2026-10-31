@@ -316,6 +316,84 @@ pub fn simulate_tectonics(
 
     // 12. Наложение поверхностных слоев: вулканизм, осадочные бассейны, карбонатные шельфы и абиссальные илы
     apply_lithology_overlays(topology, geology, &ridge_cells, noise, config);
+    compute_terrain_ruggedness(topology, geology, noise);
+}
+
+/// Вычисляет масштабонезависимую рельефность (изрезанность) каждой клетки [0.0 .. 1.0]
+pub(crate) fn compute_terrain_ruggedness(
+    topology: &WorldTopology,
+    geology: &mut GeologyLayer,
+    noise: &impl NoiseFn<f64, 3>,
+) {
+    let num_cells = topology.cells.len();
+    geology.terrain_ruggedness.resize(num_cells, 0.0);
+
+    for i in 0..num_cells {
+        let cell = &topology.cells[i];
+        let elev = geology.elevations[i];
+        let rock = geology.lithology[i];
+
+        // 1. Масштабонезависимый градиент высот (крутизна макро-склона в пересчете на радиан сферы)
+        let mut max_angular_grad = 0.0_f32;
+        let mut mean_angular_grad = 0.0_f32;
+        let n_count = cell.neighbors.len().max(1) as f32;
+
+        for &n_id in &cell.neighbors {
+            let step_rad = cell
+                .center
+                .dot(topology.cells[n_id].center)
+                .clamp(-1.0, 1.0)
+                .acos()
+                .max(1e-4);
+            let grad = (elev - geology.elevations[n_id]).abs() / step_rad;
+            if grad > max_angular_grad {
+                max_angular_grad = grad;
+            }
+            mean_angular_grad += grad;
+        }
+        mean_angular_grad /= n_count;
+
+        // Нормируем угловой градиент (на горных хребтах grad ~ 4.0..12.0)
+        let slope_score = (max_angular_grad * 0.095 + mean_angular_grad * 0.065).clamp(0.0, 0.78);
+        // 2. Внутриклеточная расчлененность (каньоны, ущелья, скальные гребни) из высокочастотного 3D-шума
+        let d = cell.center.as_dvec3();
+        let crag_a =
+            (noise.get([d.x * 26.0 + 13.4, d.y * 26.0 - 27.8, d.z * 26.0 + 41.2]) as f32).abs();
+        let crag_b =
+            (noise.get([d.x * 52.0 - 31.9, d.y * 52.0 + 18.5, d.z * 52.0 - 22.7]) as f32).abs();
+        let micro_crags = (crag_a * 0.65 + crag_b * 0.35).clamp(0.0, 1.0);
+
+        // Твердые породы и карстовые известняки сохраняют острые формы ущелий и скал, а мягкие глины сглаживаются
+        let rock_retention = match rock {
+            RockType::Granite => 1.00,      // Скальные батолиты и пики
+            RockType::Andesite => 0.95,     // Изрезанные стратовулканы и лавовые купола
+            RockType::GneissSchist => 0.88, // Складчатые хребты
+            RockType::FloodBasalt => 0.80,  // Ступенчатые трапповые плато и каньоны (тип Путорана)
+            RockType::Limestone => 0.68,    // Карстовые воронки, каньоны и останцы
+            RockType::Sandstone => 0.50,    // Овраги и столовые возвышенности
+            RockType::OceanicBasalt => 0.45,
+            RockType::ShaleClay | RockType::PelagicSediment => 0.15, // Пологие глинистые равнины
+        };
+
+        // В океане учитываем подводные хребты и желоба, на суше — высотную поясность и вулканы
+        let elev_prominence = if elev > 0.0 {
+            ((elev - 0.08).max(0.0) * 1.45).clamp(0.0, 0.45)
+        } else {
+            0.0
+        };
+        let volcano_roughness = if geology.volcano_mask[i] && elev > 0.0 {
+            0.18
+        } else {
+            0.0
+        };
+
+        let micro_score =
+            micro_crags * rock_retention * (0.14 + slope_score * 0.55 + elev_prominence * 0.60);
+
+        geology.terrain_ruggedness[i] =
+            (slope_score + elev_prominence * 0.55 + volcano_roughness + micro_score)
+                .clamp(0.0, 1.0);
+    }
 }
 
 /// Определяет базовую породу фундамента по 7 типам границ и удалению вглубь плиты

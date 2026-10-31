@@ -626,6 +626,9 @@ fn render_ui_shell(world: &mut World) -> Result {
                             .radio_value(&mut *overlay, MapOverlay::Lithology, "Породы")
                             .changed();
                         recolor |= ui
+                            .radio_value(&mut *overlay, MapOverlay::Ruggedness, "Рельефность")
+                            .changed();
+                        recolor |= ui
                             .radio_value(&mut *overlay, MapOverlay::Temperature, "Температура")
                             .changed();
                         recolor |= ui
@@ -672,7 +675,7 @@ fn render_ui_shell(world: &mut World) -> Result {
                             reposition = true;
                         }
                         ui.checkbox(&mut view_cfg.show_axis_equator, "Ось и Экватор");
-                        ui.checkbox(&mut view_cfg.show_rivers, "3D-русла рек");
+                        ui.checkbox(&mut view_cfg.show_rivers, "Русла рек");
                         ui.checkbox(&mut view_cfg.show_wind_arrows, "3D-стрелки ветров");
                         ui.checkbox(&mut view_cfg.show_ocean_currents, "3D-стрелки течений");
                     });

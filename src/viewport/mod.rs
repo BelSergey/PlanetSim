@@ -29,6 +29,7 @@ use crate::{
             tectonics_data::GeologyLayer,
             tectonics_palettes::{
                 build_elevation_colors, build_lithology_colors, build_plate_colors,
+                build_ruggedness_colors,
             },
         },
     },
@@ -79,6 +80,7 @@ pub enum MapOverlay {
     Soils,
     SoilMoisture,
     Biomes,
+    Ruggedness,
 }
 
 #[derive(Component)]
@@ -390,6 +392,7 @@ fn compute_overlay_colors(
         MapOverlay::Elevation => build_elevation_colors(geology),
         MapOverlay::TectonicPlates => build_plate_colors(geology),
         MapOverlay::Lithology => build_lithology_colors(geology),
+        MapOverlay::Ruggedness => build_ruggedness_colors(geology),
         MapOverlay::Temperature => build_temperature_colors(climate),
         MapOverlay::Humidity => build_humidity_colors(climate),
         MapOverlay::Precipitation => build_precipitation_colors(climate),

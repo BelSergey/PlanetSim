@@ -122,3 +122,35 @@ pub fn elevation_to_color(h: f32) -> Color {
         _ => Color::srgb(0.95, 0.18, 0.10),               // раскалённый красный (было 0.7)
     }
 }
+
+pub fn build_ruggedness_colors(geology: &GeologyLayer) -> Vec<[f32; 4]> {
+    geology
+        .terrain_ruggedness
+        .iter()
+        .enumerate()
+        .map(|(i, &rug)| {
+            let elev = geology.elevations[i];
+            let r_val = rug.clamp(0.0, 1.0);
+
+            if elev <= 0.0 {
+                let r = 0.04 + r_val * 0.18;
+                let g = 0.10 + r_val * 0.28;
+                let b = 0.22 + r_val * 0.35;
+                return Color::srgb(r, g, b).to_linear().to_f32_array();
+            }
+
+            let (r, g, b) = if r_val < 0.25 {
+                let t = r_val / 0.25;
+                (0.18 + t * 0.52, 0.56 + t * 0.16, 0.24 - t * 0.06)
+            } else if r_val < 0.60 {
+                let t = (r_val - 0.25) / 0.35;
+                (0.70 + t * 0.22, 0.72 - t * 0.42, 0.18 - t * 0.06)
+            } else {
+                let t = (r_val - 0.60) / 0.40;
+                (0.92 - t * 0.05, 0.30 - t * 0.10 + t * 0.55, 0.12 + t * 0.78)
+            };
+
+            Color::srgb(r, g, b).to_linear().to_f32_array()
+        })
+        .collect()
+}
