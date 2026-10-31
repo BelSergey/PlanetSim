@@ -15,6 +15,7 @@ bevy = { version = "0.19.1", default-features = false, features = [
     "bevy_pbr",           # 3D-меши (Mesh3d), материалы (StandardMaterial) и свет (DirectionalLight)
     "bevy_gizmos",        # 3D-стрелки ветров, течений и ось планеты
     "bevy_state",         # Стейт-машина AppState (MainMenu / InGame)
+    "bevy_picking",       # Блокировка кликов «сквозь» UI, Поддержка «диегетического» UI
     "tonemapping_luts",   # Стандартный тонмаппинг для 3D-сцены (чтобы цвета не искажались)
     "ktx2",               # Нужен для загрузки LUT-текстур тонмаппинга
     "zstd_rust",          # Распаковка ktx2 для тонмаппинга
