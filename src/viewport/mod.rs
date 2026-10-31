@@ -360,14 +360,14 @@ fn sync_viewport_mesh(
     if pipeline.rebuild_mesh || pipeline.reposition_mesh || pipeline.rebuild_rivers {
         if let Ok((mut river_mesh_handle, _)) = river_query.single_mut() {
             let new_river_mesh = build_river_mesh(
-    &topology,
-    &geology,
-    &hydrology,
-    &hydrology_config,
-    view_config.flat_water,
-    world_config.radius,
-    world_config.system_scale(),
-);
+                &topology,
+                &geology,
+                &hydrology,
+                &hydrology_config,
+                view_config.flat_water,
+                world_config.radius,
+                world_config.system_scale(),
+            );
             deferred_mesh_drops.push(river_mesh_handle.0.clone());
             river_mesh_handle.0 = meshes.add(new_river_mesh);
         }

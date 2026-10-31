@@ -309,7 +309,7 @@ pub fn build_river_mesh(
         } else {
             real_h
         };
-       let r_top = radius + render_h * height_scale;
+        let r_top = radius + render_h * height_scale;
         let up_normal = cell.center;
         let lift_vec = up_normal * surface_lift;
 
