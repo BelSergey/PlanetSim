@@ -5,6 +5,8 @@
 # rustup автоматически добавляет прокси rust-lld.exe в ~/.cargo/bin,
 # поэтому указывать полный путь к папке пользователя не нужно.
 linker = "rust-lld.exe"
+# Оптимизировать исполняемый код под CPU, на котором выполняется сборка.
+rustflags = ["-C", "target-cpu=native"]
 
 [target.x86_64-unknown-linux-gnu]
 linker = "clang"

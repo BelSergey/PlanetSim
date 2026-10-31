@@ -3,11 +3,12 @@
 use super::tectonics_data::{GeologyLayer, PlateType, RockType};
 use bevy::color::{Color, ColorToComponents};
 use bevy::prelude::*;
+use rayon::prelude::*;
 
 pub fn build_lithology_colors(geology: &GeologyLayer) -> Vec<[f32; 4]> {
     geology
         .lithology
-        .iter()
+        .par_iter()
         .enumerate()
         .map(|(i, &rock)| {
             let elev = geology.elevations[i];
@@ -45,7 +46,7 @@ pub fn build_lithology_colors(geology: &GeologyLayer) -> Vec<[f32; 4]> {
 pub fn build_elevation_colors(geology: &GeologyLayer) -> Vec<[f32; 4]> {
     geology
         .elevations
-        .iter()
+        .par_iter()
         .map(|&h| elevation_to_color(h).to_linear().to_f32_array())
         .collect()
 }
@@ -82,7 +83,7 @@ pub fn build_plate_colors(geology: &GeologyLayer) -> Vec<[f32; 4]> {
 
     geology
         .plate_ids
-        .iter()
+        .par_iter()
         .enumerate()
         .map(|(i, &plate_id)| {
             if geology.volcano_mask[i] {
@@ -126,7 +127,7 @@ pub fn elevation_to_color(h: f32) -> Color {
 pub fn build_ruggedness_colors(geology: &GeologyLayer) -> Vec<[f32; 4]> {
     geology
         .terrain_ruggedness
-        .iter()
+        .par_iter()
         .enumerate()
         .map(|(i, &rug)| {
             let elev = geology.elevations[i];

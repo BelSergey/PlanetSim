@@ -22,13 +22,13 @@ pub(super) fn compute_season_precipitation(
     snap: &mut SeasonalSnapshot,
 ) {
     let num_cells = topology.cells.len();
-    let nbrs = &topology.cells;
+    let neighbor_ids = &precalc.neighbor_ids_flat;
     let elevs = &geology.elevations;
     let offs = &precalc.neighbor_offsets;
     let tdirs = &precalc.tangent_dirs_flat;
     let hex_rad = precalc.avg_hex_rad;
 
-    let sum_wind: f32 = wind_speed.iter().copied().sum();
+    let sum_wind: f32 = wind_speed.par_iter().copied().sum();
     let avg_wind = (sum_wind / num_cells.max(1) as f32).max(1e-4);
     let ref_wind = avg_wind * 1.15;
 
@@ -54,9 +54,9 @@ pub(super) fn compute_season_precipitation(
             let my_p = pressures[i].clamp(-1.0, 1.0);
             let sp = wind_speed[i];
             let norm_sp = (sp / ref_wind).clamp(0.0, 1.45).sqrt();
-            let neighbors = &nbrs[i].neighbors;
             let start = offs[i];
             let end = offs[i + 1];
+            let degree = end - start;
 
             // Запас пара с мягкой зависимостью от температуры (чтобы умеренные широты тоже получали осадки)
             let avail_water = (q + 0.08).powf(0.55);
@@ -75,7 +75,7 @@ pub(super) fn compute_season_precipitation(
                 for j in start..end {
                     let w = w_air[j];
                     if w > 0.0 {
-                        let n_id = neighbors[j - start];
+                        let n_id = neighbor_ids[j] as usize;
                         let n_elev = elevs[n_id].max(0.0);
                         let dh = (my_elev - n_elev).max(0.0);
 
@@ -105,12 +105,12 @@ pub(super) fn compute_season_precipitation(
             let mut convergence = 0.0;
             let my_wind = winds_3d[i];
             for j in start..end {
-                let n_id = neighbors[j - start];
+                let n_id = neighbor_ids[j] as usize;
                 let inflow = (winds_3d[n_id] - my_wind).dot(-tdirs[j]);
                 convergence += inflow;
             }
-            if !neighbors.is_empty() {
-                let raw_conv = convergence / (neighbors.len() as f32 * avg_wind * hex_rad * 2.0);
+            if degree > 0 {
+                let raw_conv = convergence / (degree as f32 * avg_wind * hex_rad * 2.0);
                 convergence = raw_conv.clamp(0.0, 2.0);
             }
 
@@ -152,7 +152,6 @@ pub(super) fn compute_season_precipitation(
 
         out_c.par_iter_mut().enumerate().for_each(|(i, c_out)| {
             let sp = wind_speed[i];
-            let neighbors = &nbrs[i].neighbors;
             let my_p = pressures[i].clamp(-1.0, 1.0);
 
             let norm_sp = (sp / ref_wind).clamp(0.08, 1.45).sqrt();
@@ -167,7 +166,7 @@ pub(super) fn compute_season_precipitation(
                 for j in start..end {
                     let w = w_air[j];
                     if w > 0.0 {
-                        upwind_c += prev_c[neighbors[j - start]] * w;
+                        upwind_c += prev_c[neighbor_ids[j] as usize] * w;
                     }
                 }
                 upwind_c / w_sum
@@ -177,10 +176,16 @@ pub(super) fn compute_season_precipitation(
 
             let mut c = prev_c[i] * (1.0 - step_rate) + incoming_c * step_rate;
 
-            if !neighbors.is_empty() {
+            let start = offs[i];
+            let end = offs[i + 1];
+            let degree = end - start;
+            if degree > 0 {
                 let chaos_mix = (0.45 - my_p * 0.20) * diff_fraction;
-                let sum: f32 = neighbors.iter().map(|&n_id| prev_c[n_id]).sum();
-                let nbr_c = sum / neighbors.len() as f32;
+                let mut sum = 0.0f32;
+                for j in start..end {
+                    sum += prev_c[neighbor_ids[j] as usize];
+                }
+                let nbr_c = sum / degree as f32;
                 c = c * (1.0 - chaos_mix) + nbr_c * chaos_mix;
             }
 
@@ -199,14 +204,17 @@ pub(super) fn compute_season_precipitation(
     }
 
     // 4. Финальная нормализация карты осадков [0.0 .. 1.0]
-    for i in 0..num_cells {
-        let raw_p = snap.precipitation[i].max(0.0);
-        let norm_precip = (1.0 - (-raw_p * 2.20).exp()).clamp(0.0, 1.0);
-        snap.precipitation[i] = norm_precip;
+    snap.precipitation.par_iter_mut()
+        .zip(snap.humidity.par_iter_mut())
+        .enumerate()
+        .for_each(|(i, (precip_out, humidity_out))| {
+            let raw_p = (*precip_out).max(0.0);
+            let norm_precip = (1.0 - (-raw_p * 2.20).exp()).clamp(0.0, 1.0);
+            *precip_out = norm_precip;
 
-        if elevs[i] > 0.0 {
-            let local_boost = (norm_precip * 0.05 + surface_wetness[i] * 0.05) * recycling;
-            snap.humidity[i] = (snap.humidity[i] + local_boost).clamp(0.0, 1.0);
-        }
-    }
+            if elevs[i] > 0.0 {
+                let local_boost = (norm_precip * 0.05 + surface_wetness[i] * 0.05) * recycling;
+                *humidity_out = (*humidity_out + local_boost).clamp(0.0, 1.0);
+            }
+        });
 }

@@ -1,6 +1,7 @@
 // src/domains/climate/climate_palettes.rs
 
 use bevy::prelude::*;
+use rayon::prelude::*;
 
 use super::climate_data::ClimateLayer;
 use crate::{
@@ -14,7 +15,7 @@ use crate::{
 pub fn build_humidity_colors(climate: &ClimateLayer) -> Vec<[f32; 4]> {
     climate
         .humidity
-        .iter()
+        .par_iter()
         .map(|&h| humidity_to_color(h).to_linear().to_f32_array())
         .collect()
 }
@@ -48,7 +49,7 @@ fn humidity_to_color(h: f32) -> Color {
 pub fn build_temperature_colors(climate: &ClimateLayer) -> Vec<[f32; 4]> {
     climate
         .temperatures
-        .iter()
+        .par_iter()
         .map(|&t| temperature_to_color(t).to_linear().to_f32_array())
         .collect()
 }
@@ -88,7 +89,7 @@ fn temperature_to_color(t: f32) -> Color {
 pub fn build_albedo_colors(climate: &ClimateLayer) -> Vec<[f32; 4]> {
     climate
         .albedo
-        .iter()
+        .par_iter()
         .map(|&a| Color::srgb(a, a, a).to_linear().to_f32_array())
         .collect()
 }
@@ -96,7 +97,7 @@ pub fn build_albedo_colors(climate: &ClimateLayer) -> Vec<[f32; 4]> {
 pub fn build_continentality_colors(climate: &ClimateLayer) -> Vec<[f32; 4]> {
     climate
         .continentality
-        .iter()
+        .par_iter()
         .map(|&c| {
             let color = if c < 0.0 {
                 // ОКЕАН: c ∈ [-1.0 (открытый океан) .. 0.0 (берег/маргинальное море)]
@@ -122,7 +123,7 @@ pub fn build_continentality_colors(climate: &ClimateLayer) -> Vec<[f32; 4]> {
 pub fn build_pressure_colors(climate: &ClimateLayer) -> Vec<[f32; 4]> {
     climate
         .pressure
-        .iter()
+        .par_iter()
         .map(|&p| {
             let norm = p.clamp(-1.0, 1.0);
             let color = if norm < 0.0 {
@@ -141,13 +142,14 @@ pub fn build_pressure_colors(climate: &ClimateLayer) -> Vec<[f32; 4]> {
 pub fn build_wind_colors(climate: &ClimateLayer) -> Vec<[f32; 4]> {
     let max_speed = climate
         .winds
-        .iter()
+        .par_iter()
         .map(|w| w.length())
-        .fold(0.0001_f32, f32::max);
+        .reduce(|| 0.0001_f32, f32::max) // ← замыкание вместо значения
+        .max(0.0001);
 
     climate
         .winds
-        .iter()
+        .par_iter()
         .map(|&w| {
             let s = (w.length() / max_speed).clamp(0.0, 1.0).sqrt();
             wind_speed_to_color(s).to_linear().to_f32_array()
@@ -265,7 +267,7 @@ pub(super) fn draw_ocean_currents_gizmos(
 pub fn build_precipitation_colors(climate: &ClimateLayer) -> Vec<[f32; 4]> {
     climate
         .precipitation
-        .iter()
+        .par_iter()
         .zip(&climate.temperatures)
         .map(|(&p, &t)| precipitation_to_color(p, t).to_linear().to_f32_array())
         .collect()

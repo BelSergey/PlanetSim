@@ -19,7 +19,8 @@ use crate::{
             HydrologyConfig, HydrologyLayer, apply_surface_feedback_to_climate, simulate_hydrology,
         },
         tectonics::{
-            GeologyLayer, TectonicsConfig, generate_hotspots, generate_plates, simulate_tectonics,
+            GeologyLayer, TectonicEvolutionConfig, TectonicsConfig, generate_hotspots,
+            generate_plates, simulate_tectonics,
         },
     },
     world::{
@@ -29,16 +30,6 @@ use crate::{
         topology::WorldTopology,
     },
 };
-
-/// Ресурс-запрос: позволяет UI или хоткеям заказать фоновую генерацию без блокировки экрана
-#[derive(Resource, Default)]
-pub struct GenerationRequest(pub Option<PipelineStage>);
-
-impl GenerationRequest {
-    pub fn request(&mut self, stage: PipelineStage) {
-        self.0 = Some(stage);
-    }
-}
 
 /// Запись об одном этапе генерации для отображения в UI
 #[derive(Clone)]
@@ -184,11 +175,12 @@ pub fn spawn_generation_task(
     topology: Res<WorldTopology>,
     geology_res: Res<GeologyLayer>,
     t_config: Res<TectonicsConfig>,
+    t_evolution_config: Res<TectonicEvolutionConfig>, // <-- новое
     c_config: Res<ClimateConfig>,
     climate_res: Res<ClimateLayer>,
     h_config: Res<HydrologyConfig>,
 ) {
-    let Some(stage) = req.0.take() else {
+    let Some((stage, evolve)) = req.take() else {
         return;
     };
     next_state.set(AppState::InGame);
@@ -206,8 +198,9 @@ pub fn spawn_generation_task(
     let t_config = (*t_config).clone();
     let c_config = (*c_config).clone();
     let h_config = (*h_config).clone();
+    let t_evolution_config = (*t_evolution_config).clone();
 
-    let existing_geology = if stage > PipelineStage::Tectonics {
+    let existing_geology = if stage > PipelineStage::Tectonics || evolve {
         Some((*geology_res).clone())
     } else {
         None
@@ -236,11 +229,31 @@ pub fn spawn_generation_task(
     );
 
     let task = thread_pool.spawn(async move {
-        let _ = thread_priority::set_current_thread_priority(thread_priority::ThreadPriority::Min);
         // Шаг 1–2: Тектоника (если нужна)
-        let (geology, is_new_geology) = if let Some(geo) = existing_geology {
+        let (geology, is_new_geology) = if evolve {
+            // === Эволюция: дрейф плит на месте, без реролла ===
+            logger_clone.start_step("Эволюция тектоники: дрейф плит...");
+            let mut geo = existing_geology.expect("evolve requires existing geology");
+
+            for plate in &mut geo.plates {
+                let angle = plate.angular_vel * t_evolution_config.rotation_per_epoch;
+                let rot = Quat::from_axis_angle(plate.euler_pole, angle);
+                plate.center_dir = (rot * plate.center_dir).normalize();
+            }
+
+            // Пересоздать вулканы по новым положениям плит
+            let mut rng = StdRng::seed_from_u64(seed as u64);
+            geo.volcanoes = generate_hotspots(&mut rng, &geo.plates, &t_config);
+
+            logger_clone.start_step("Симуляция движения коры и литологии...");
+            let perlin = Fbm::<Perlin>::new(seed);
+            simulate_tectonics(&topology, &mut geo, &perlin, &t_config);
+
+            (geo, true)
+        } else if let Some(geo) = existing_geology {
             (geo, false)
         } else {
+            // === Полная регенерация (как раньше) ===
             logger_clone.start_step("Формирование тектонических плит и вулканов...");
             let mut rng = StdRng::seed_from_u64(seed as u64);
             let perlin = Fbm::<Perlin>::new(seed);
@@ -253,8 +266,6 @@ pub fn spawn_generation_task(
             logger_clone.start_step("Симуляция движения коры и литологии...");
             simulate_tectonics(&topology, &mut geology, &perlin, &t_config);
 
-            // Геология остаётся единственным экземпляром: климат читает её по ссылке,
-            // а готовый слой передаётся обратно в ECS после завершения генерации.
             (geology, true)
         };
 
@@ -395,5 +406,28 @@ pub fn handle_generation_task(
     } else if gen_task.logger.finished_elapsed_ms() >= 600 {
         // Держим окно лога 0.6 сек после 100% готовности, чтобы пользователь увидел результат
         commands.entity(entity).despawn();
+    }
+}
+
+#[derive(Resource, Default)]
+pub struct GenerationRequest {
+    pub stage: Option<PipelineStage>,
+    pub evolve_plates: bool,
+}
+
+impl GenerationRequest {
+    pub fn request(&mut self, stage: PipelineStage) {
+        self.stage = Some(stage);
+        self.evolve_plates = false;
+    }
+    pub fn request_evolve(&mut self, stage: PipelineStage) {
+        self.stage = Some(stage);
+        self.evolve_plates = true;
+    }
+    pub(crate) fn take(&mut self) -> Option<(PipelineStage, bool)> {
+        let stage = self.stage.take()?;
+        let evolve = self.evolve_plates;
+        self.evolve_plates = false;
+        Some((stage, evolve))
     }
 }

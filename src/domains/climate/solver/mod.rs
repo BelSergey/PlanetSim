@@ -63,7 +63,11 @@ pub(super) struct SolverPrecalc {
     /// Для каждой пары (клетка, сосед) — единичный вектор в касательной плоскости.
     /// Уложены подряд, разбиение по клеткам — через neighbor_offsets.
     pub tangent_dirs_flat: Vec<Vec3>,
-    /// neighbor_offsets[i]..neighbor_offsets[i+1] — диапазон в tangent_dirs_flat для клетки i.
+    /// Индекс клетки-владельца для каждой записи в плоском списке соседей.
+    pub edge_cell_ids: Vec<u32>,
+    /// Индексы соседних клеток в том же плоском порядке, что tangent_dirs_flat.
+    pub neighbor_ids_flat: Vec<u32>,
+    /// neighbor_offsets[i]..neighbor_offsets[i+1] — диапазон в плоских массивах соседей клетки i.
     /// Длина — num_cells + 1.
     pub neighbor_offsets: Vec<usize>,
 }
@@ -105,80 +109,113 @@ impl SolverPrecalc {
         let mut pressure_wave_noise = Vec::with_capacity(num_cells);
 
         let mut tangent_dirs_flat = Vec::new();
+        let mut edge_cell_ids = Vec::new();
+        let mut neighbor_ids_flat = Vec::new();
         let mut neighbor_offsets = Vec::with_capacity(num_cells + 1);
         neighbor_offsets.push(0usize);
 
-        for (i, c) in continentality.iter().enumerate().take(num_cells) {
-            let cell = &topology.cells[i];
+        // Each cell's geographic constants, noise samples and tangent neighbor vectors are independent.
+        // Compute them in parallel, then flatten the variable-length neighbor lists in stable cell order.
+        let precalc_cells: Vec<_> = topology.cells.par_iter().enumerate().map(|(i, cell)| {
             let pos = cell.center;
             let lat = cell.lat_lon.x;
             let elev = geology.elevations[i];
+            let c = continentality[i];
 
             let (s_lat, c_lat) = lat.sin_cos();
-            sin_lat.push(s_lat);
-            cos_lat.push(c_lat);
+            let east = Vec3::Y.cross(pos).normalize_or_zero();
+            let north = pos.cross(east).normalize_or_zero();
 
-            let e = Vec3::Y.cross(pos).normalize_or_zero();
-            let n = pos.cross(e).normalize_or_zero();
-            east.push(e);
-            north.push(n);
-
-            let m_height = elevation_cooling(
+            let mountain_cooling = elevation_cooling(
                 elev,
                 config.mountain_base_level,
                 config.mountain_blend_width,
-            );
-            mountain_cooling.push(m_height * config.altitude_lapse_rate);
+            ) * config.altitude_lapse_rate;
 
             let annual_lat_insolation = c_lat.max(0.0);
             let ocean_lat_baseline = config.pole_temp
                 + (config.equator_temp - config.pole_temp) * annual_lat_insolation * 0.94;
-            ocean_equilibrium.push(ocean_lat_baseline * 0.88 + global_avg * 0.12);
-            ocean_ref_temp.push(ocean_lat_baseline * 0.78 + global_avg * 0.22);
+            let ocean_equilibrium = ocean_lat_baseline * 0.88 + global_avg * 0.12;
+            let ocean_ref_temp = ocean_lat_baseline * 0.78 + global_avg * 0.22;
 
-            let mod_val = if *c < 0.0 {
+            let moderation = if c < 0.0 {
                 config.base_ocean_moderation * (1.0 - r * (1.0 - c.abs()))
             } else {
                 config.base_ocean_moderation * (1.0 - r) * (1.0 - c)
             };
-            moderation.push(mod_val);
 
-            let b_shift = if elev <= 0.0 && lat.abs() > 1.0 {
+            let bathymetry_shift = if elev <= 0.0 && lat.abs() > 1.0 {
                 let deep_water_factor = smoothstep((elev - (-0.06)) / (-0.22 - (-0.06)));
                 (deep_water_factor - 0.35) * 6.0
             } else {
                 0.0
             };
-            bathymetry_shift.push(b_shift);
 
             let friction_k = if elev <= 0.0 { 3.6 } else { 2.4 };
             let max_cor_rad = if elev <= 0.0 { 1.12 } else { 0.85 };
             let cor_ang = (-(s_lat * friction_k * config.coriolis_strength).atan()
                 * (max_cor_rad / std::f32::consts::FRAC_PI_2))
                 .clamp(-1.35, 1.35);
-            let (ss, cs) = cor_ang.sin_cos();
-            coriolis_cos.push(cs);
-            coriolis_sin.push(ss);
+            let (coriolis_sin, coriolis_cos) = cor_ang.sin_cos();
 
             let ek_ang = (-(s_lat * 3.2).atan() * 0.65).clamp(-1.2, 1.2);
-            let (se, ce) = ek_ang.sin_cos();
-            ekman_cos.push(ce);
-            ekman_sin.push(se);
+            let (ekman_sin, ekman_cos) = ek_ang.sin_cos();
 
-            // Предрасчет синоптических волн в атмосфере
             let p = pos.as_dvec3() * 4.5;
-            synoptic_noise_a.push(synoptic_perlin.get([p.x + 13.5, p.y + 27.1, p.z + 41.9]) as f32);
-            synoptic_noise_b.push(synoptic_perlin.get([p.x - 53.2, p.y + 18.4, p.z - 29.7]) as f32);
-            pressure_wave_noise.push(synoptic_perlin.get([
+            let synoptic_noise_a =
+                synoptic_perlin.get([p.x + 13.5, p.y + 27.1, p.z + 41.9]) as f32;
+            let synoptic_noise_b =
+                synoptic_perlin.get([p.x - 53.2, p.y + 18.4, p.z - 29.7]) as f32;
+            let pressure_wave_noise = synoptic_perlin.get([
                 p.x * 0.65 + 71.0,
                 p.y * 0.65 - 33.0,
                 p.z * 0.65 + 12.0,
-            ]) as f32);
+            ]) as f32;
 
-            for &n_id in &cell.neighbors {
-                let raw = topology.cells[n_id].center - pos;
-                tangent_dirs_flat.push((raw - pos * raw.dot(pos)).normalize_or_zero());
+            let mut tangent_dirs = Vec::with_capacity(cell.neighbors.len());
+            let mut neighbor_ids = Vec::with_capacity(cell.neighbors.len());
+            for &neighbor_id in &cell.neighbors {
+                let raw = topology.cells[neighbor_id].center - pos;
+                tangent_dirs.push((raw - pos * raw.dot(pos)).normalize_or_zero());
+                neighbor_ids.push(neighbor_id as u32);
             }
+
+            (
+                s_lat, c_lat, east, north, mountain_cooling,
+                ocean_equilibrium, ocean_ref_temp, moderation, bathymetry_shift,
+                coriolis_cos, coriolis_sin, ekman_cos, ekman_sin,
+                synoptic_noise_a, synoptic_noise_b, pressure_wave_noise,
+                tangent_dirs,
+                vec![i as u32; cell.neighbors.len()],
+                neighbor_ids,
+            )
+        }).collect();
+
+        for (
+            s_lat, c_lat, e, n, m_height,
+            ocean_eq, ocean_ref, mod_val, b_shift,
+            cor_cos, cor_sin, ek_cos, ek_sin,
+            noise_a, noise_b, wave_noise, tangent_dirs, cell_ids, neighbor_ids,
+        ) in precalc_cells {
+            sin_lat.push(s_lat);
+            cos_lat.push(c_lat);
+            east.push(e);
+            north.push(n);
+            mountain_cooling.push(m_height);
+            ocean_equilibrium.push(ocean_eq);
+            ocean_ref_temp.push(ocean_ref);
+            moderation.push(mod_val);
+            bathymetry_shift.push(b_shift);
+            coriolis_cos.push(cor_cos);
+            coriolis_sin.push(cor_sin);
+            ekman_cos.push(ek_cos);
+            ekman_sin.push(ek_sin);
+            synoptic_noise_a.push(noise_a);
+            synoptic_noise_b.push(noise_b);
+            pressure_wave_noise.push(wave_noise);
+            tangent_dirs_flat.extend(tangent_dirs);
+            edge_cell_ids.extend(cell_ids);
+            neighbor_ids_flat.extend(neighbor_ids);
             neighbor_offsets.push(tangent_dirs_flat.len());
         }
 
@@ -201,6 +238,8 @@ impl SolverPrecalc {
             synoptic_noise_b,
             pressure_wave_noise,
             tangent_dirs_flat,
+            edge_cell_ids,
+            neighbor_ids_flat,
             neighbor_offsets,
         }
     }
@@ -355,32 +394,42 @@ fn simulate_single_season(
     precalc: &SolverPrecalc,
     snap: &mut SeasonalSnapshot,
 ) {
+    let season_started = std::time::Instant::now();
+    let mut pressure_winds_us = 0u128;
+    let mut ocean_currents_us = 0u128;
+    let mut ocean_advection_us = 0u128;
+    let mut air_advection_us = 0u128;
+
     let num_cells = topology.cells.len();
     let sun_lat = config.axial_tilt * season_mult;
     let (sin_sun, cos_sun) = sun_lat.sin_cos();
 
     let mut scratch = SeasonScratch::new(num_cells);
 
-    // --- 1. Первичная оценка температуры от Солнца ---
-    for (i, surf_alb) in surface_albedo.iter().enumerate().take(num_cells) {
-        let elev = geology.elevations[i];
-        let base_insolation =
-            daily_mean_insolation(precalc.sin_lat[i], precalc.cos_lat[i], sin_sun, cos_sun);
+    // --- 1. Первичная оценка температуры от Солнца (ячейки независимы) ---
+    snap.albedo.par_iter_mut()
+        .zip(snap.temperatures.par_iter_mut())
+        .zip(scratch.sea_level_temps.par_iter_mut())
+        .enumerate()
+        .for_each(|(i, ((albedo_out, temperature_out), sea_temperature_out))| {
+            let elev = geology.elevations[i];
+            let base_insolation = daily_mean_insolation(
+                precalc.sin_lat[i], precalc.cos_lat[i], sin_sun, cos_sun,
+            );
+            let temp_est = config.pole_temp
+                + (config.equator_temp - config.pole_temp) * base_insolation;
+            let temp_with_height = temp_est - precalc.mountain_cooling[i];
+            *albedo_out = calc_albedo(temp_with_height, elev, surface_albedo[i], config);
+            let rad_sea_temp = calc_radiative_sea_temp(
+                i, *albedo_out, base_insolation, precalc, config, geology,
+            );
+            *sea_temperature_out = rad_sea_temp;
+            *temperature_out = rad_sea_temp - precalc.mountain_cooling[i];
+        });
 
-        let temp_est =
-            config.pole_temp + (config.equator_temp - config.pole_temp) * base_insolation;
-        let temp_with_height = temp_est - precalc.mountain_cooling[i];
-
-        snap.albedo[i] = calc_albedo(temp_with_height, elev, *surf_alb, config);
-        let rad_sea_temp =
-            calc_radiative_sea_temp(i, snap.albedo[i], base_insolation, precalc, config, geology);
-
-        scratch.sea_level_temps[i] = rad_sea_temp;
-        snap.temperatures[i] = rad_sea_temp - precalc.mountain_cooling[i];
-    }
-
-    // --- 2. Широтные пояса давления (постоянны весь сезон, с 3D-волнами Россби от сида) ---
-    for (i, c) in continentality.iter().enumerate().take(num_cells) {
+    // --- 2. Широтные пояса давления (ячейки независимы) ---
+    scratch.latitudinal_pressure.par_iter_mut().enumerate().for_each(|(i, pressure_out)| {
+        let c = continentality[i];
         let lat = topology.cells[i].lat_lon.x;
         let lon = topology.cells[i].lat_lon.y;
         let belt_lat = lat - sun_lat * 0.55 + precalc.pressure_wave_noise[i] * 0.045;
@@ -391,21 +440,20 @@ fn simulate_single_season(
         let sin_2lat_abs = (2.0 * precalc.sin_lat[i] * precalc.cos_lat[i]).abs();
         let noise_rossby = precalc.pressure_wave_noise[i] * 0.25 * sin_2lat_abs;
 
-        let belt_envelope = if *c < 0.0 {
+        let belt_envelope = if c < 0.0 {
             let ocean_core = smoothstep(-c);
             let rossby_wave =
                 1.0 + (0.30 * (3.0 * lon + belt_lat * 2.0).cos() * sin_2lat_abs) + noise_rossby;
             (0.55 + 0.85 * ocean_core) * rossby_wave
         } else {
-            (1.0 - 0.15 * smoothstep(*c)) * (1.0 + noise_rossby * 0.5)
+            (1.0 - 0.15 * smoothstep(c)) * (1.0 + noise_rossby * 0.5)
         };
 
-        scratch.latitudinal_pressure[i] =
-            base_belt * belt_envelope * config.latitudinal_pressure_weight;
-    }
+        *pressure_out = base_belt * belt_envelope * config.latitudinal_pressure_weight;
+    });
 
     // --- 3. Буферы весов адвекции (аллоцируются 1 раз на сезон) ---
-    let nbrs = &topology.cells;
+    let neighbor_ids = &precalc.neighbor_ids_flat;
     let elevs = &geology.elevations;
     let offs = &precalc.neighbor_offsets;
     let tdirs = &precalc.tangent_dirs_flat;
@@ -428,6 +476,7 @@ fn simulate_single_season(
     let iterations = config.equilibrium_iterations.max(1);
     for _ in 0..iterations {
         // А) Давление и ветра
+        let phase_started = std::time::Instant::now();
         compute_season_pressure_and_winds(
             season_mult,
             topology,
@@ -438,8 +487,10 @@ fn simulate_single_season(
             &mut scratch,
             snap,
         );
+        pressure_winds_us += phase_started.elapsed().as_micros();
 
         // Б) Течения
+        let phase_started = std::time::Instant::now();
         compute_ocean_currents(
             topology,
             geology,
@@ -449,72 +500,68 @@ fn simulate_single_season(
             &mut scratch,
             snap,
         );
+        ocean_currents_us += phase_started.elapsed().as_micros();
 
         // В) Предвычислить wind_dir / wind_speed (1 раз на итерацию)
         wind_speed
             .par_iter_mut()
             .enumerate()
             .for_each(|(i, sp)| *sp = snap.winds_3d[i].length());
-        for i in 0..num_cells {
+        wind_dir.par_iter_mut().enumerate().for_each(|(i, dir_out)| {
             let sp = wind_speed[i];
-            wind_dir[i] = if sp > 0.001 {
-                snap.winds_3d[i] / sp
-            } else {
-                Vec3::ZERO
-            };
-        }
+            *dir_out = if sp > 0.001 { snap.winds_3d[i] / sp } else { Vec3::ZERO };
+        });
 
-        // Веса соседей для воздуха
-        for i in 0..num_cells {
-            let dir = wind_dir[i];
-            let start = offs[i];
-            let end = offs[i + 1];
-            let mut total = 0.0;
-            for j in start..end {
-                let a = tdirs[j].dot(dir);
-                let w = if a < 0.0 { a * a } else { 0.0 };
-                w_air[j] = w;
-                total += w;
-            }
-            total_air[i] = total;
-        }
+        // Веса воздушной адвекции: каждый элемент плоского списка независим.
+        w_air.par_iter_mut().enumerate().for_each(|(j, weight_out)| {
+            let cell_id = precalc.edge_cell_ids[j] as usize;
+            let alignment = tdirs[j].dot(wind_dir[cell_id]);
+            *weight_out = if alignment < 0.0 { alignment * alignment } else { 0.0 };
+        });
+        total_air.par_iter_mut().enumerate().for_each(|(i, total_out)| {
+            *total_out = w_air[offs[i]..offs[i + 1]].iter().sum();
+        });
 
         // Г) Предвычислить current_dir / current_speed + веса (только вода)
-        for i in 0..num_cells {
-            if elevs[i] > 0.0 {
-                current_speed[i] = 0.0;
-                current_dir[i] = Vec3::ZERO;
-                total_ocean[i] = 0.0;
-                continue;
-            }
-            let cur = snap.ocean_currents[i];
-            let sp = cur.length();
-            current_speed[i] = sp;
-            current_dir[i] = if sp > 0.001 { cur / sp } else { Vec3::ZERO };
-
-            let dir = current_dir[i];
-            let start = offs[i];
-            let end = offs[i + 1];
-            let mut total = 0.0;
-            for j in start..end {
-                let k = j - start;
-                let n_id = nbrs[i].neighbors[k];
-                if elevs[n_id] > 0.0 {
-                    w_ocean[j] = 0.0;
-                    continue;
+        current_dir.par_iter_mut()
+            .zip(current_speed.par_iter_mut())
+            .zip(total_ocean.par_iter_mut())
+            .enumerate()
+            .for_each(|(i, ((dir_out, speed_out), total_out))| {
+                if elevs[i] > 0.0 {
+                    *dir_out = Vec3::ZERO;
+                    *speed_out = 0.0;
+                    *total_out = 0.0;
+                } else {
+                    let current = snap.ocean_currents[i];
+                    let speed = current.length();
+                    *speed_out = speed;
+                    *dir_out = if speed > 0.001 { current / speed } else { Vec3::ZERO };
                 }
-                let a = tdirs[j].dot(dir);
-                let w = if a < 0.0 { a * a } else { 0.0 };
-                w_ocean[j] = w;
-                total += w;
+            });
+        w_ocean.par_iter_mut().enumerate().for_each(|(j, weight_out)| {
+            let cell_id = precalc.edge_cell_ids[j] as usize;
+            let neighbor_id = neighbor_ids[j] as usize;
+            if elevs[cell_id] > 0.0 || elevs[neighbor_id] > 0.0 {
+                *weight_out = 0.0;
+            } else {
+                let alignment = tdirs[j].dot(current_dir[cell_id]);
+                *weight_out = if alignment < 0.0 { alignment * alignment } else { 0.0 };
             }
-            total_ocean[i] = total;
-        }
+        });
+        total_ocean.par_iter_mut().enumerate().for_each(|(i, total_out)| {
+            *total_out = if elevs[i] > 0.0 {
+                0.0
+            } else {
+                w_ocean[offs[i]..offs[i + 1]].iter().sum()
+            };
+        });
 
         // Д) Океаническая адвекция (15 итераций)
         scratch
             .ocean_temps
             .copy_from_slice(&scratch.sea_level_temps);
+        let phase_started = std::time::Instant::now();
         for _ in 0..15 {
             std::mem::swap(&mut scratch.ocean_temps, &mut scratch.prev_ocean);
             let prev = &scratch.prev_ocean;
@@ -530,8 +577,7 @@ fn simulate_single_season(
                 let mut upwind = 0.0;
                 for (j, w) in w_ocean.iter().enumerate().take(end).skip(start) {
                     if *w > 0.0 {
-                        let k = j - start;
-                        let n_id = nbrs[i].neighbors[k];
+                        let n_id = neighbor_ids[j] as usize;
                         upwind += prev[n_id] * w;
                     }
                 }
@@ -542,18 +588,21 @@ fn simulate_single_season(
             });
         }
 
+        ocean_advection_us += phase_started.elapsed().as_micros();
+
         // Смешиваем тепло океана в sea_level_temps
-        for (i, e) in elevs.iter().enumerate().take(num_cells) {
-            if *e <= 0.0 {
-                scratch.sea_level_temps[i] =
-                    scratch.sea_level_temps[i] * 0.25 + scratch.ocean_temps[i] * 0.75;
+        let ocean_temps = &scratch.ocean_temps;
+        scratch.sea_level_temps.par_iter_mut().enumerate().for_each(|(i, sea_temp)| {
+            if elevs[i] <= 0.0 {
+                *sea_temp = *sea_temp * 0.25 + ocean_temps[i] * 0.75;
             }
-        }
+        });
 
         // Е) Воздушная адвекция (25 итераций)
         scratch
             .advected_temps
             .copy_from_slice(&scratch.sea_level_temps);
+        let phase_started = std::time::Instant::now();
         for _ in 0..25 {
             std::mem::swap(&mut scratch.advected_temps, &mut scratch.prev_temps);
             let prev = &scratch.prev_temps;
@@ -570,8 +619,7 @@ fn simulate_single_season(
                 let mut upwind = 0.0;
                 for (j, w) in w_air.iter().enumerate().take(end).skip(start) {
                     if *w > 0.0 {
-                        let k = j - start;
-                        let n_id = nbrs[i].neighbors[k];
+                        let n_id = neighbor_ids[j] as usize;
                         upwind += prev[n_id] * w;
                     }
                 }
@@ -581,55 +629,50 @@ fn simulate_single_season(
             });
         }
 
+        air_advection_us += phase_started.elapsed().as_micros();
+
         // Ж) Радиационный баланс
         let air_blend = (config.heat_advection_strength * 0.55).clamp(0.0, 0.85);
         let ocean_blend = config.ocean_advection_rate.clamp(0.0, 0.85);
 
-        for i in 0..num_cells {
-            let base_insolation =
-                (precalc.cos_lat[i] * cos_sun + precalc.sin_lat[i] * sin_sun).max(0.0);
-            let rad_temp = calc_radiative_sea_temp(
-                i,
-                snap.albedo[i],
-                base_insolation,
-                precalc,
-                config,
-                geology,
-            );
-            let elev = elevs[i];
-
-            if elev <= 0.0 {
-                let transported_water_temp =
-                    scratch.ocean_temps[i] * 0.8 + scratch.advected_temps[i] * 0.2;
-                scratch.sea_level_temps[i] =
-                    rad_temp * (1.0 - ocean_blend) + transported_water_temp * ocean_blend;
-            } else {
-                scratch.sea_level_temps[i] =
-                    rad_temp * (1.0 - air_blend) + scratch.advected_temps[i] * air_blend;
-            }
-
-            let mut final_temp = scratch.sea_level_temps[i] - precalc.mountain_cooling[i];
-
-            // Теплоёмкость сглаживает сезонный размах только на СУШЕ.
-            // Океан уже сглажен через ocean_advection_rate (иначе двойной учёт).
-            if elev > 0.0 {
-                let hc = surface_heat_capacity[i].clamp(0.0, 1.0);
-                if hc > 0.01 {
-                    // Осреднённая по сезонам температура (равноденственная инсоляция):
-                    let annual_mean = config.pole_temp
-                        + (config.equator_temp - config.pole_temp) * precalc.cos_lat[i] * 0.82;
-                    let damping = (1.0 - hc * 0.55).max(0.35);
-                    final_temp = annual_mean + (final_temp - annual_mean) * damping;
-                    scratch.sea_level_temps[i] = final_temp + precalc.mountain_cooling[i];
+        let ocean_temps = &scratch.ocean_temps;
+        let advected_temps = &scratch.advected_temps;
+        snap.temperatures.par_iter_mut()
+            .zip(snap.albedo.par_iter_mut())
+            .zip(scratch.sea_level_temps.par_iter_mut())
+            .enumerate()
+            .for_each(|(i, ((temperature_out, albedo_out), sea_temp_out))| {
+                let base_insolation =
+                    (precalc.cos_lat[i] * cos_sun + precalc.sin_lat[i] * sin_sun).max(0.0);
+                let rad_temp = calc_radiative_sea_temp(
+                    i, *albedo_out, base_insolation, precalc, config, geology,
+                );
+                let elev = elevs[i];
+                if elev <= 0.0 {
+                    let transported_water_temp =
+                        ocean_temps[i] * 0.8 + advected_temps[i] * 0.2;
+                    *sea_temp_out = rad_temp * (1.0 - ocean_blend) + transported_water_temp * ocean_blend;
+                } else {
+                    *sea_temp_out = rad_temp * (1.0 - air_blend) + advected_temps[i] * air_blend;
                 }
-            }
-
-            snap.temperatures[i] = final_temp;
-            snap.albedo[i] = calc_albedo(final_temp, elev, surface_albedo[i], config);
-        }
+                let mut final_temp = *sea_temp_out - precalc.mountain_cooling[i];
+                if elev > 0.0 {
+                    let hc = surface_heat_capacity[i].clamp(0.0, 1.0);
+                    if hc > 0.01 {
+                        let annual_mean = config.pole_temp
+                            + (config.equator_temp - config.pole_temp) * precalc.cos_lat[i] * 0.82;
+                        let damping = (1.0 - hc * 0.55).max(0.35);
+                        final_temp = annual_mean + (final_temp - annual_mean) * damping;
+                        *sea_temp_out = final_temp + precalc.mountain_cooling[i];
+                    }
+                }
+                *temperature_out = final_temp;
+                *albedo_out = calc_albedo(final_temp, elev, surface_albedo[i], config);
+            });
     }
 
     // Финальная синхронизация давления, ветров и течений
+    let phase_started = std::time::Instant::now();
     compute_season_pressure_and_winds(
         season_mult,
         topology,
@@ -640,6 +683,8 @@ fn simulate_single_season(
         &mut scratch,
         snap,
     );
+    pressure_winds_us += phase_started.elapsed().as_micros();
+    let phase_started = std::time::Instant::now();
     compute_ocean_currents(
         topology,
         geology,
@@ -649,30 +694,28 @@ fn simulate_single_season(
         &mut scratch,
         snap,
     );
+    ocean_currents_us += phase_started.elapsed().as_micros();
     // Обновляем веса ветров по финальному полю winds_3d и считаем влажность сезона
     wind_speed
         .par_iter_mut()
         .enumerate()
         .for_each(|(i, sp)| *sp = snap.winds_3d[i].length());
-    for i in 0..num_cells {
-        let sp = wind_speed[i];
-        let dir = if sp > 0.001 {
-            snap.winds_3d[i] / sp
+    w_air.par_iter_mut().enumerate().for_each(|(j, weight_out)| {
+        let cell_id = precalc.edge_cell_ids[j] as usize;
+        let speed = wind_speed[cell_id];
+        let dir = if speed > 0.001 {
+            snap.winds_3d[cell_id] / speed
         } else {
             Vec3::ZERO
         };
-        let start = offs[i];
-        let end = offs[i + 1];
-        let mut total = 0.0;
-        for j in start..end {
-            let a = tdirs[j].dot(dir);
-            let w = if a < 0.0 { a * a } else { 0.0 };
-            w_air[j] = w;
-            total += w;
-        }
-        total_air[i] = total;
-    }
+        let alignment = tdirs[j].dot(dir);
+        *weight_out = if alignment < 0.0 { alignment * alignment } else { 0.0 };
+    });
+    total_air.par_iter_mut().enumerate().for_each(|(i, total_out)| {
+        *total_out = w_air[offs[i]..offs[i + 1]].iter().sum();
+    });
 
+    let moisture_started = std::time::Instant::now();
     compute_season_moisture(
         topology,
         geology,
@@ -686,6 +729,8 @@ fn simulate_single_season(
         &mut scratch,
         snap,
     );
+    let moisture_us = moisture_started.elapsed().as_micros();
+    let precipitation_started = std::time::Instant::now();
 
     compute_season_precipitation(
         topology,
@@ -699,6 +744,28 @@ fn simulate_single_season(
         &mut scratch,
         snap,
     );
+    let precipitation_us = precipitation_started.elapsed().as_micros();
+    let total_us = season_started.elapsed().as_micros();
+    let measured_us = pressure_winds_us
+        + ocean_currents_us
+        + ocean_advection_us
+        + air_advection_us
+        + moisture_us
+        + precipitation_us;
+    let other_us = total_us.saturating_sub(measured_us);
+
+    bevy::log::info!(
+        "CLIMATE_PROFILE: season={}, pressure_winds={} ms, ocean_currents={} ms, ocean_advection={} ms, air_advection={} ms, moisture={} ms, precipitation={} ms, other={} ms, total={} ms",
+        season_mult,
+        pressure_winds_us / 1000,
+        ocean_currents_us / 1000,
+        ocean_advection_us / 1000,
+        air_advection_us / 1000,
+        moisture_us / 1000,
+        precipitation_us / 1000,
+        other_us / 1000,
+        total_us / 1000
+    );
 }
 
 /// Равномерно распределённые точки на сфере (golden spiral).
@@ -708,21 +775,26 @@ fn sample_cells_on_sphere(topology: &WorldTopology, count: usize) -> Vec<usize> 
     let denom = (count.saturating_sub(1)).max(1) as f32;
     let mut used = std::collections::HashSet::with_capacity(count);
 
-    for k in 0..count {
+    // Параллельный подбор ближайших клеток для всех точек выборки
+    let nearest: Vec<usize> = (0..count).into_par_iter().map(|k| {
         let y = 1.0 - (k as f32 / denom) * 2.0;
-        let r = (1.0 - y * y).max(0.0).sqrt();
+        let radius = (1.0 - y * y).max(0.0).sqrt();
         let theta = golden * k as f32;
-        let sample = bevy::math::Vec3::new(theta.cos() * r, y, theta.sin() * r);
+        let sample = bevy::math::Vec3::new(theta.cos() * radius, y, theta.sin() * radius);
 
         let mut best_i = 0usize;
         let mut best_d = f32::MAX;
         for (i, cell) in topology.cells.iter().enumerate() {
-            let d = sample.distance_squared(cell.center);
-            if d < best_d {
-                best_d = d;
+            let distance = sample.distance_squared(cell.center);
+            if distance < best_d {
+                best_d = distance;
                 best_i = i;
             }
         }
+        best_i
+    }).collect();
+
+    for best_i in nearest {
         if used.insert(best_i) {
             result.push(best_i);
         }
@@ -736,8 +808,8 @@ fn build_arrows_from_samples(
     vectors: &[bevy::math::Vec3],
     elevations: Option<&[f32]>,
 ) -> Vec<(usize, f32)> {
-    let mut speeds: Vec<f32> = vectors.iter().map(|v| v.length()).collect();
-    speeds.sort_by(|a, b| a.total_cmp(b));
+    let mut speeds: Vec<f32> = vectors.par_iter().map(|v| v.length()).collect();
+    speeds.par_sort_unstable_by(|a, b| a.total_cmp(b));
     let idx = ((speeds.len() as f32) * 0.95) as usize;
     let max_speed = speeds.get(idx).copied().unwrap_or(0.0001).max(0.0001);
 

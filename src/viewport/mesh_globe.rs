@@ -1,4 +1,5 @@
 // src/viewport/mesh_globe.rs
+use rayon::prelude::*;
 
 use crate::world::topology::WorldTopology;
 use bevy::{
@@ -12,28 +13,39 @@ use crate::domains::{
     tectonics::tectonics_data::GeologyLayer,
 };
 
+use bevy::render::mesh::VertexAttributeValues;
+
 /// Оценивает точное количество вершин и индексов поверхности глобуса.
 /// Используется для резервирования памяти без фиксированных многомиллионных capacity.
 fn globe_mesh_sizes(topology: &WorldTopology, elevations: &[f32]) -> (usize, usize) {
-    let mut vertices = 0usize;
-    let mut indices = 0usize;
+    topology
+        .cells
+        .par_iter()
+        .enumerate()
+        .map(|(cell_id, cell)| {
+            let corners = cell.corners.len();
+            let walls = cell
+                .neighbors
+                .iter()
+                .filter(|&&neighbor_id| elevations[cell_id] > elevations[neighbor_id])
+                .count();
+            (
+                1 + corners + walls * 4,
+                corners * 3 + walls * 6,
+            )
+        })
+        .reduce(
+            || (0usize, 0usize),
+            |a, b| (a.0.saturating_add(b.0), a.1.saturating_add(b.1)),
+        )
+}
 
-    for (cell_id, cell) in topology.cells.iter().enumerate() {
-        let corners = cell.corners.len();
-        vertices = vertices.saturating_add(1 + corners);
-        indices = indices.saturating_add(corners.saturating_mul(3));
-
-        let h = elevations[cell_id];
-        let walls = cell
-            .neighbors
-            .iter()
-            .filter(|&&neighbor_id| h > elevations[neighbor_id])
-            .count();
-        vertices = vertices.saturating_add(walls.saturating_mul(4));
-        indices = indices.saturating_add(walls.saturating_mul(6));
-    }
-
-    (vertices, indices)
+#[derive(Default)]
+struct GlobeMeshChunk {
+    positions: Vec<[f32; 3]>,
+    normals: Vec<[f32; 3]>,
+    colors: Vec<[f32; 4]>,
+    indices: Vec<u32>,
 }
 
 pub fn build_globe_mesh(
@@ -44,91 +56,111 @@ pub fn build_globe_mesh(
     radius: f32,
     height_scale: f32,
 ) -> Mesh {
+    const CELLS_PER_CHUNK: usize = 512;
+
     let (vertex_capacity, index_capacity) = globe_mesh_sizes(topology, elevations);
+    let chunks: Vec<GlobeMeshChunk> = topology
+        .cells
+        .par_chunks(CELLS_PER_CHUNK)
+        .enumerate()
+        .map(|(chunk_index, cells)| {
+            let mut chunk = GlobeMeshChunk::default();
+            let first_cell = chunk_index * CELLS_PER_CHUNK;
+
+            for (local_cell_id, cell) in cells.iter().enumerate() {
+                let cell_id = first_cell + local_cell_id;
+                let real_h = elevations[cell_id];
+                let render_h = if flatten_water { real_h.max(0.0) } else { real_h };
+                let r = radius + render_h * height_scale;
+                let top_color = cell_colors[cell_id];
+                let top_normal = cell.center.to_array();
+
+                let base_idx = chunk.positions.len() as u32;
+                chunk.positions.push((cell.center * r).to_array());
+                chunk.normals.push(top_normal);
+                chunk.colors.push(top_color);
+
+                let n_corners = cell.corners.len();
+                for &corner_dir in &cell.corners {
+                    chunk.positions.push((corner_dir * r).to_array());
+                    chunk.normals.push(top_normal);
+                    chunk.colors.push(top_color);
+                }
+
+                for k in 0..n_corners as u32 {
+                    let next_k = (k + 1) % n_corners as u32;
+                    chunk.indices.extend_from_slice(&[
+                        base_idx,
+                        base_idx + 1 + k,
+                        base_idx + 1 + next_k,
+                    ]);
+                }
+
+                let wall_color = [
+                    top_color[0] * 0.75,
+                    top_color[1] * 0.75,
+                    top_color[2] * 0.75,
+                    top_color[3],
+                ];
+
+                for k in 0..n_corners {
+                    let neighbor_id = cell.neighbors[k];
+                    let real_neighbor_h = elevations[neighbor_id];
+                    if real_h > real_neighbor_h {
+                        let render_neighbor_h = if flatten_water {
+                            real_neighbor_h.max(0.0)
+                        } else {
+                            real_neighbor_h
+                        };
+                        let r_bottom = radius + render_neighbor_h * height_scale;
+
+                        let c1 = cell.corners[k];
+                        let c2 = cell.corners[(k + 1) % n_corners];
+                        let v_top_left = c1 * r;
+                        let v_top_right = c2 * r;
+                        let v_bot_left = c1 * r_bottom;
+                        let v_bot_right = c2 * r_bottom;
+
+                        let edge_dir = v_top_right - v_top_left;
+                        let down_dir = v_bot_left - v_top_left;
+                        let wall_normal = down_dir.cross(edge_dir).normalize_or_zero().to_array();
+
+                        let wall_base = chunk.positions.len() as u32;
+                        chunk.positions.extend_from_slice(&[
+                            v_top_left.to_array(),
+                            v_top_right.to_array(),
+                            v_bot_left.to_array(),
+                            v_bot_right.to_array(),
+                        ]);
+                        chunk.normals.extend_from_slice(&[wall_normal; 4]);
+                        chunk.colors.extend_from_slice(&[wall_color; 4]);
+                        chunk.indices.extend_from_slice(&[
+                            wall_base,
+                            wall_base + 2,
+                            wall_base + 1,
+                            wall_base + 1,
+                            wall_base + 2,
+                            wall_base + 3,
+                        ]);
+                    }
+                }
+            }
+            chunk
+        })
+        .collect();
+
     let mut positions: Vec<[f32; 3]> = Vec::with_capacity(vertex_capacity);
     let mut normals: Vec<[f32; 3]> = Vec::with_capacity(vertex_capacity);
     let mut colors: Vec<[f32; 4]> = Vec::with_capacity(vertex_capacity);
     let mut indices: Vec<u32> = Vec::with_capacity(index_capacity);
 
-    for (cell_id, cell) in topology.cells.iter().enumerate() {
-        let real_h = elevations[cell_id];
-        let render_h = if flatten_water {
-            real_h.max(0.0)
-        } else {
-            real_h
-        };
-        let r = radius + render_h * height_scale;
-        let top_color = cell_colors[cell_id];
-        let top_normal = cell.center.to_array();
-
-        let base_idx = positions.len() as u32;
-        positions.push((cell.center * r).to_array());
-        normals.push(top_normal);
-        colors.push(top_color);
-
-        let n_corners = cell.corners.len();
-        for &corner_dir in &cell.corners {
-            positions.push((corner_dir * r).to_array());
-            normals.push(top_normal);
-            colors.push(top_color);
-        }
-
-        for k in 0..n_corners as u32 {
-            let next_k = (k + 1) % n_corners as u32;
-            indices.extend_from_slice(&[base_idx, base_idx + 1 + k, base_idx + 1 + next_k]);
-        }
-
-        let wall_color = [
-            top_color[0] * 0.75,
-            top_color[1] * 0.75,
-            top_color[2] * 0.75,
-            top_color[3],
-        ];
-
-        for k in 0..n_corners {
-            let neighbor_id = cell.neighbors[k];
-            let real_neighbor_h = elevations[neighbor_id];
-
-            if real_h > real_neighbor_h {
-                let render_neighbor_h = if flatten_water {
-                    real_neighbor_h.max(0.0)
-                } else {
-                    real_neighbor_h
-                };
-                let r_bottom = radius + render_neighbor_h * height_scale;
-
-                let c1 = cell.corners[k];
-                let c2 = cell.corners[(k + 1) % n_corners];
-
-                let v_top_left = c1 * r;
-                let v_top_right = c2 * r;
-                let v_bot_left = c1 * r_bottom;
-                let v_bot_right = c2 * r_bottom;
-
-                let edge_dir = v_top_right - v_top_left;
-                let down_dir = v_bot_left - v_top_left;
-                let wall_normal = down_dir.cross(edge_dir).normalize_or_zero().to_array();
-
-                let wall_base = positions.len() as u32;
-                positions.extend_from_slice(&[
-                    v_top_left.to_array(),
-                    v_top_right.to_array(),
-                    v_bot_left.to_array(),
-                    v_bot_right.to_array(),
-                ]);
-                normals.extend_from_slice(&[wall_normal; 4]);
-                colors.extend_from_slice(&[wall_color; 4]);
-
-                indices.extend_from_slice(&[
-                    wall_base,
-                    wall_base + 2,
-                    wall_base + 1,
-                    wall_base + 1,
-                    wall_base + 2,
-                    wall_base + 3,
-                ]);
-            }
-        }
+    // Chunk collection preserves cell order; only the vertex base offset changes when flattening.
+    for chunk in chunks {
+        let vertex_offset = positions.len() as u32;
+        positions.extend(chunk.positions);
+        normals.extend(chunk.normals);
+        colors.extend(chunk.colors);
+        indices.extend(chunk.indices.into_iter().map(|index| index + vertex_offset));
     }
 
     let mut mesh = Mesh::new(
@@ -142,47 +174,50 @@ pub fn build_globe_mesh(
     mesh
 }
 
+#[allow(dead_code)]
 pub fn recolor_globe_mesh(
     topology: &WorldTopology,
     elevations: &[f32],
     cell_colors: &[[f32; 4]],
 ) -> Vec<[f32; 4]> {
-    let (vertex_capacity, _) = globe_mesh_sizes(topology, elevations);
-    let mut colors: Vec<[f32; 4]> = Vec::with_capacity(vertex_capacity);
+    // 1. Параллельно считаем цвета каждой клетки в отдельный маленький Vec.
+    let per_cell: Vec<Vec<[f32; 4]>> = topology
+        .cells
+        .par_iter()
+        .enumerate()
+        .map(|(cell_id, cell)| {
+            let h = elevations[cell_id];
+            let top_color = cell_colors[cell_id];
+            let n_corners = cell.corners.len();
 
-    for (cell_id, cell) in topology.cells.iter().enumerate() {
-        let h = elevations[cell_id];
-        let top_color = cell_colors[cell_id];
+            let wall_color = [
+                top_color[0] * 0.75,
+                top_color[1] * 0.75,
+                top_color[2] * 0.75,
+                top_color[3],
+            ];
 
-        // Цвет центра
-        colors.push(top_color);
+            let mut local: Vec<[f32; 4]> = Vec::with_capacity(1 + n_corners + 4 * n_corners);
 
-        // Цвета углов
-        let n_corners = cell.corners.len();
-        for _ in 0..n_corners {
-            colors.push(top_color);
-        }
-
-        // Цвета отвесных стен (затемненные)
-        let wall_color = [
-            top_color[0] * 0.75,
-            top_color[1] * 0.75,
-            top_color[2] * 0.75,
-            top_color[3],
-        ];
-
-        for k in 0..n_corners {
-            let neighbor_id = cell.neighbors[k];
-            let neighbor_h = elevations[neighbor_id];
-
-            if h > neighbor_h {
-                // Если есть стена, она состоит из 4 вершин (quad)
-                colors.extend_from_slice(&[wall_color; 4]);
+            local.push(top_color); // центр
+            local.extend(std::iter::repeat_n(top_color, n_corners)); // углы
+            for k in 0..n_corners {
+                if h > elevations[cell.neighbors[k]] {
+                    // отвесные стены
+                    local.extend_from_slice(&[wall_color; 4]);
+                }
             }
-        }
-    }
+            local
+        })
+        .collect();
 
-    colors
+    // 2. Плоский буфер: заранее знаем размер, конкатенация в один проход.
+    let total_len: usize = per_cell.iter().map(Vec::len).sum();
+    let mut out = Vec::with_capacity(total_len);
+    for chunk in per_cell {
+        out.extend_from_slice(&chunk);
+    }
+    out
 }
 
 pub fn reposition_globe_mesh(
@@ -192,51 +227,60 @@ pub fn reposition_globe_mesh(
     radius: f32,
     height_scale: f32,
 ) -> Vec<[f32; 3]> {
+    const CELLS_PER_CHUNK: usize = 512;
+
     let (vertex_capacity, _) = globe_mesh_sizes(topology, real_elevations);
-    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(vertex_capacity);
+    let chunks: Vec<Vec<[f32; 3]>> = topology
+        .cells
+        .par_chunks(CELLS_PER_CHUNK)
+        .enumerate()
+        .map(|(chunk_index, cells)| {
+            let first_cell = chunk_index * CELLS_PER_CHUNK;
+            let estimated_capacity = cells.iter().map(|cell| 1 + cell.corners.len() * 5).sum();
+            let mut chunk_positions = Vec::with_capacity(estimated_capacity);
 
-    for (cell_id, cell) in topology.cells.iter().enumerate() {
-        let real_h = real_elevations[cell_id];
-        let render_h = if flatten_water {
-            real_h.max(0.0)
-        } else {
-            real_h
-        };
-        let r = radius + render_h * height_scale;
+            for (local_cell_id, cell) in cells.iter().enumerate() {
+                let cell_id = first_cell + local_cell_id;
+                let real_h = real_elevations[cell_id];
+                let render_h = if flatten_water { real_h.max(0.0) } else { real_h };
+                let r = radius + render_h * height_scale;
+                chunk_positions.push((cell.center * r).to_array());
 
-        // Центр и углы
-        positions.push((cell.center * r).to_array());
-        let n_corners = cell.corners.len();
-        for &corner_dir in &cell.corners {
-            positions.push((corner_dir * r).to_array());
-        }
+                let n_corners = cell.corners.len();
+                for &corner_dir in &cell.corners {
+                    chunk_positions.push((corner_dir * r).to_array());
+                }
 
-        // Стены: ВАЖНО проверять по real_h, чтобы число вершин не изменилось!
-        for k in 0..n_corners {
-            let neighbor_id = cell.neighbors[k];
-            let real_neighbor_h = real_elevations[neighbor_id];
-
-            if real_h > real_neighbor_h {
-                let render_neighbor_h = if flatten_water {
-                    real_neighbor_h.max(0.0)
-                } else {
-                    real_neighbor_h
-                };
-                let r_bottom = radius + render_neighbor_h * height_scale;
-
-                let c1 = cell.corners[k];
-                let c2 = cell.corners[(k + 1) % n_corners];
-
-                positions.extend_from_slice(&[
-                    (c1 * r).to_array(),
-                    (c2 * r).to_array(),
-                    (c1 * r_bottom).to_array(),
-                    (c2 * r_bottom).to_array(),
-                ]);
+                // Compare real elevations so the number and order of wall vertices stay unchanged.
+                for k in 0..n_corners {
+                    let neighbor_id = cell.neighbors[k];
+                    let real_neighbor_h = real_elevations[neighbor_id];
+                    if real_h > real_neighbor_h {
+                        let render_neighbor_h = if flatten_water {
+                            real_neighbor_h.max(0.0)
+                        } else {
+                            real_neighbor_h
+                        };
+                        let r_bottom = radius + render_neighbor_h * height_scale;
+                        let c1 = cell.corners[k];
+                        let c2 = cell.corners[(k + 1) % n_corners];
+                        chunk_positions.extend_from_slice(&[
+                            (c1 * r).to_array(),
+                            (c2 * r).to_array(),
+                            (c1 * r_bottom).to_array(),
+                            (c2 * r_bottom).to_array(),
+                        ]);
+                    }
+                }
             }
-        }
-    }
+            chunk_positions
+        })
+        .collect();
 
+    let mut positions = Vec::with_capacity(vertex_capacity);
+    for chunk in chunks {
+        positions.extend(chunk);
+    }
     positions
 }
 
@@ -574,5 +618,48 @@ fn push_center_hub(
     for k in 0..N_SIDES {
         let next_k = (k + 1) % N_SIDES;
         indices.extend_from_slice(&[base, base + 1 + k, base + 1 + next_k]);
+    }
+}
+
+pub fn recolor_globe_mesh_in_place(
+    mesh: &mut Mesh,
+    topology: &WorldTopology,
+    elevations: &[f32],
+    cell_colors: &[[f32; 4]],
+) {
+    if let Some(VertexAttributeValues::Float32x4(colors)) =
+        mesh.attribute_mut(Mesh::ATTRIBUTE_COLOR)
+    {
+        let mut offset = 0;
+        for (cell_id, cell) in topology.cells.iter().enumerate() {
+            let h = elevations[cell_id];
+            let top_color = cell_colors[cell_id];
+            let n_corners = cell.corners.len();
+
+            let wall_color = [
+                top_color[0] * 0.75,
+                top_color[1] * 0.75,
+                top_color[2] * 0.75,
+                top_color[3],
+            ];
+
+            // Центр
+            colors[offset] = top_color;
+            offset += 1;
+
+            // Углы
+            for _ in 0..n_corners {
+                colors[offset] = top_color;
+                offset += 1;
+            }
+
+            // Отвесные стены
+            for k in 0..n_corners {
+                if h > elevations[cell.neighbors[k]] {
+                    colors[offset..offset + 4].copy_from_slice(&[wall_color; 4]);
+                    offset += 4;
+                }
+            }
+        }
     }
 }

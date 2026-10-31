@@ -1,6 +1,7 @@
 // src/world/topology.rs
 
 use bevy::prelude::*;
+use rayon::prelude::*;
 use std::{collections::HashMap, sync::Arc};
 
 pub type CellId = usize;
@@ -126,7 +127,7 @@ impl WorldTopology {
         let mut incident_faces = vec![Vec::with_capacity(6); num_cells];
 
         let face_centers: Vec<Vec3> = faces
-            .iter()
+            .par_iter()
             .map(|&[a, b, c]| {
                 (vertices[a as usize] + vertices[b as usize] + vertices[c as usize]).normalize()
             })
@@ -157,9 +158,10 @@ impl WorldTopology {
         face_centers: &[Vec3],
     ) -> Vec<TopologicalCell> {
         let num_cells = vertices.len();
-        let mut cells = Vec::with_capacity(num_cells);
 
-        for i in 0..num_cells {
+        (0..num_cells)
+            .into_par_iter()
+            .map(|i| {
             let center = vertices[i];
             let lat = center.y.clamp(-1.0, 1.0).asin();
             let lon = center.z.atan2(center.x);
@@ -206,13 +208,13 @@ impl WorldTopology {
                 ordered_neighbors.push(best_neighbor);
             }
 
-            cells.push(TopologicalCell {
+            TopologicalCell {
                 center,
                 lat_lon: Vec2::new(lat, lon),
                 neighbors: ordered_neighbors,
                 corners,
-            });
-        }
-        cells
+            }
+        })
+            .collect()
     }
 }

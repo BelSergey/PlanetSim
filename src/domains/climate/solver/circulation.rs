@@ -24,22 +24,17 @@ pub(super) fn compute_season_pressure_and_winds(
     scratch: &mut SeasonScratch,
     snap: &mut SeasonalSnapshot,
 ) {
-    let num_cells = topology.cells.len();
     let avg_hex_rad = precalc.avg_hex_rad;
 
     // 1. Термическое поле (считается заново каждую итерацию)
-    for (i, c) in continentality.iter().enumerate().take(num_cells) {
+    scratch.thermal_field.par_iter_mut().enumerate().for_each(|(i, out)| {
+        let c = continentality[i];
         let sea_level_temp = snap.temperatures[i] + precalc.mountain_cooling[i];
         let ocean_ref_temp = precalc.ocean_ref_temp[i];
         let temp_diff = (sea_level_temp - ocean_ref_temp) / 12.0;
-
-        let weight = if *c >= 0.0 {
-            0.4 + 0.6 * c
-        } else {
-            0.4 * (1.0 + c * 0.6)
-        };
-        scratch.thermal_field[i] = (-temp_diff * weight).clamp(-1.2, 1.2);
-    }
+        let weight = if c >= 0.0 { 0.4 + 0.6 * c } else { 0.4 * (1.0 + c * 0.6) };
+        *out = (-temp_diff * weight).clamp(-1.2, 1.2);
+    });
 
     // Сглаживание термического поля (параллельно)
     for _ in 0..10 {
@@ -61,10 +56,10 @@ pub(super) fn compute_season_pressure_and_winds(
     }
 
     // 2. Давление = Широтные пояса (из scratch, посчитаны 1 раз на сезон) + Термика
-    for i in 0..num_cells {
-        snap.pressure[i] = scratch.latitudinal_pressure[i]
+    snap.pressure.par_iter_mut().enumerate().for_each(|(i, pressure)| {
+        *pressure = scratch.latitudinal_pressure[i]
             + scratch.thermal_field[i] * config.thermal_pressure_weight;
-    }
+    });
 
     // Сглаживание давления (параллельно)
     for _ in 0..8 {
@@ -89,14 +84,18 @@ pub(super) fn compute_season_pressure_and_winds(
     let offs = &precalc.neighbor_offsets;
     let tdirs = &precalc.tangent_dirs_flat;
 
-    for i in 0..num_cells {
+    let pressure = &snap.pressure;
+    snap.winds_3d.par_iter_mut()
+        .zip(snap.winds.par_iter_mut())
+        .enumerate()
+        .for_each(|(i, (wind_out, wind_2d_out))| {
         let cell = &topology.cells[i];
         let pos = cell.center;
         let my_elev = (geology.elevations[i] - config.mountain_base_level).max(0.0);
         let east = precalc.east[i];
         let north = precalc.north[i];
 
-        let my_p = snap.pressure[i];
+        let my_p = pressure[i];
         let mut grad_3d = Vec3::ZERO;
 
         let start = offs[i];
@@ -107,7 +106,7 @@ pub(super) fn compute_season_pressure_and_winds(
             let n_pos = topology.cells[n_id].center;
             let raw_dir = n_pos - pos;
             let safe_dist = raw_dir.length().max(avg_hex_rad * 0.3);
-            let diff = (my_p - snap.pressure[n_id]) / safe_dist;
+            let diff = (my_p - pressure[n_id]) / safe_dist;
             grad_3d += tdir * diff;
         }
 
@@ -174,9 +173,9 @@ pub(super) fn compute_season_pressure_and_winds(
         let barrier_factor = 1.0 / (1.0 + total_drag * config.mountain_wind_barrier * 0.15);
         wind_3d = wind_3d * barrier_factor * config.wind_speed_multiplier;
 
-        snap.winds_3d[i] = wind_3d;
-        snap.winds[i] = Vec2::new(wind_3d.dot(east), wind_3d.dot(north));
-    }
+        *wind_out = wind_3d;
+        *wind_2d_out = Vec2::new(wind_3d.dot(east), wind_3d.dot(north));
+    });
 }
 
 pub(super) fn compute_ocean_currents(
@@ -188,23 +187,25 @@ pub(super) fn compute_ocean_currents(
     scratch: &mut SeasonScratch,
     snap: &mut SeasonalSnapshot,
 ) {
-    let num_cells = topology.cells.len();
     let avg_hex_rad = precalc.avg_hex_rad;
     let offs = &precalc.neighbor_offsets;
     let tdirs = &precalc.tangent_dirs_flat;
 
-    for i in 0..num_cells {
+    let pressure = &snap.pressure;
+    let temperatures = &snap.temperatures;
+    let winds_3d = &snap.winds_3d;
+    snap.ocean_currents.par_iter_mut().enumerate().for_each(|(i, current_out)| {
         if geology.elevations[i] > 0.0 {
-            snap.ocean_currents[i] = Vec3::ZERO;
-            continue;
+            *current_out = Vec3::ZERO;
+            return;
         }
 
         let cell = &topology.cells[i];
         let pos = cell.center;
 
         // 1. Ветровое течение
-        let mut wind_current = snap.winds_3d[i] * config.ocean_current_speed_multiplier;
-        if snap.temperatures[i] <= 0.0 {
+        let mut wind_current = winds_3d[i] * config.ocean_current_speed_multiplier;
+        if temperatures[i] <= 0.0 {
             wind_current *= 0.1;
         }
 
@@ -217,7 +218,7 @@ pub(super) fn compute_ocean_currents(
         );
 
         // 3. Геострофическое течение (угол ±π/2 → cos=0, sin=±1, только cross)
-        let my_p = snap.pressure[i];
+        let my_p = pressure[i];
         let mut grad_p = Vec3::ZERO;
         let start = offs[i];
         let end = offs[i + 1];
@@ -228,7 +229,7 @@ pub(super) fn compute_ocean_currents(
                 let n_pos = topology.cells[n_id].center;
                 let raw_dir = n_pos - pos;
                 let safe_dist = raw_dir.length().max(avg_hex_rad * 0.3);
-                let diff = (my_p - snap.pressure[n_id]) / safe_dist;
+                let diff = (my_p - pressure[n_id]) / safe_dist;
                 grad_p += tdir * diff;
             }
         }
@@ -275,8 +276,8 @@ pub(super) fn compute_ocean_currents(
                 1.0 + (config.boundary_current_multiplier - 1.0) * 0.35 * coastal_proximity;
         }
 
-        snap.ocean_currents[i] = current_3d;
-    }
+        *current_out = current_3d;
+    });
 
     // 5. Лёгкое сглаживание течений (параллельно)
     for _ in 0..2 {

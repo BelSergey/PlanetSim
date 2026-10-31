@@ -1,6 +1,7 @@
 // src/domains/climate/solver/continentality.rs
 
 use std::collections::VecDeque;
+use rayon::prelude::*;
 
 use super::super::{climate_config::ClimateConfig, climate_data::ClimateLayer};
 use super::smoothstep;
@@ -98,16 +99,16 @@ pub(super) fn compute_continentality(
     let avg_hex_rad = (4.0 * std::f32::consts::PI / num_cells as f32).sqrt();
 
     // Знаковая континентальность: -1 = открытый океан, 0 = берег, +1 = глубь континента
-    for i in 0..num_cells {
+    climate.continentality.par_iter_mut().enumerate().for_each(|(i, out)| {
         let is_water = geology.elevations[i] <= 0.0;
-        climate.continentality[i] = if is_water {
+        *out = if is_water {
             let physical_dist = dist_to_land[i] as f32 * avg_hex_rad;
             let norm = (physical_dist / config.ocean_continentality_scale).min(1.0);
-            -smoothstep(norm) // -1 далеко от материков, 0 у берега материка
+            -smoothstep(norm)
         } else {
             let physical_dist = dist_to_ocean[i] as f32 * avg_hex_rad;
             let norm = (physical_dist / config.land_continentality_scale).min(1.0);
-            smoothstep(norm) // 0 на островах и пляжах, +1 в глубине материка
+            smoothstep(norm)
         };
-    }
+    });
 }

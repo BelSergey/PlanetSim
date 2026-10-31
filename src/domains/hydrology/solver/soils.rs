@@ -1,6 +1,7 @@
 // src/domains/hydrology/solver/soils.rs
 
 use super::SurfaceNoise;
+use rayon::prelude::*;
 use crate::{
     domains::{
         climate::climate_data::ClimateLayer,
@@ -21,19 +22,23 @@ pub(super) fn compute_soils(
     config: &HydrologyConfig,
     noise: &SurfaceNoise,
 ) {
-    let num_cells = topology.cells.len();
-
-    for i in 0..num_cells {
+    hydrology.soils.par_iter_mut()
+        .zip(hydrology.soil_texture.par_iter_mut())
+        .zip(hydrology.soil_depth.par_iter_mut())
+        .zip(hydrology.water_capacity.par_iter_mut())
+        .zip(hydrology.permeability.par_iter_mut())
+        .enumerate()
+        .for_each(|(i, ((((soil_out, texture_out), depth_out), capacity_out), permeability_out))| {
         let elev = geology.elevations[i];
 
         // Океаническое дно не имеет наземного почвенного профиля
         if elev <= 0.0 {
-            hydrology.soils[i] = SoilType::Ocean;
-            hydrology.soil_texture[i] = [0.0, 0.3, 0.7];
-            hydrology.soil_depth[i] = 0.0;
-            hydrology.water_capacity[i] = 1.0;
-            hydrology.permeability[i] = 0.0;
-            continue;
+            *soil_out = SoilType::Ocean;
+            *texture_out = [0.0, 0.3, 0.7];
+            *depth_out = 0.0;
+            *capacity_out = 1.0;
+            *permeability_out = 0.0;
+            return;
         }
 
         // 1. Климатические показатели за год (Весна/Осень имеет двойной вес в цикле года)
@@ -112,7 +117,7 @@ pub(super) fn compute_soils(
         sand /= tex_sum;
         silt /= tex_sum;
         clay /= tex_sum;
-        hydrology.soil_texture[i] = [sand, silt, clay];
+        *texture_out = [sand, silt, clay];
 
         // 5. Мощность почвенного профиля (глубина)
         let climate_depth_mod =
@@ -120,7 +125,7 @@ pub(super) fn compute_soils(
         let slope_depth_factor =
             (1.0 - max_slope * config.slope_erosion_sensitivity * 0.85).clamp(0.08, 1.0);
         let depth = (slope_depth_factor * climate_depth_mod).clamp(0.08, 1.0);
-        hydrology.soil_depth[i] = depth;
+        *depth_out = depth;
 
         // 6. Педотрансферные функции: Влагоемкость (WHC) и Водопроницаемость
         let is_permafrost = eff_mean_temp < config.permafrost_temp_threshold || eff_warm_temp < 3.0;
@@ -132,18 +137,18 @@ pub(super) fn compute_soils(
             1.0
         };
         let specific_whc = (0.12 * sand + 0.52 * silt + 0.38 * clay) * volcanic_bonus;
-        hydrology.water_capacity[i] = (specific_whc * (0.25 + 0.75 * depth)).clamp(0.05, 1.0);
+        *capacity_out = (specific_whc * (0.25 + 0.75 * depth)).clamp(0.05, 1.0);
 
         // Проницаемость: максимальна в песках и карсте, блокируется глиной и вечной мерзлотой
         let raw_perm = sand * 0.82 + silt * 0.24 + clay * 0.04 + rock.karst_permeability();
-        hydrology.permeability[i] = if is_permafrost {
+        *permeability_out = if is_permafrost {
             0.03 // Мерзлота работает как водоупор
         } else {
             (raw_perm * (0.4 + 0.6 * depth)).clamp(0.02, 1.0)
         };
 
         // 7. Итоговая классификация почвенного типа (SoilType)
-        hydrology.soils[i] = classify_soil_type(
+        *soil_out = classify_soil_type(
             eff_mean_temp,
             eff_warm_temp,
             eff_moisture_index,
@@ -156,7 +161,7 @@ pub(super) fn compute_soils(
             geology.volcano_mask[i],
             config,
         );
-    }
+    });
 }
 
 #[allow(clippy::too_many_arguments)]

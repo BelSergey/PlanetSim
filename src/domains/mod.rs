@@ -1,5 +1,4 @@
 // src/domains/mod.rs
-
 pub mod climate;
 pub mod generator;
 pub mod hydrology;
@@ -34,7 +33,6 @@ impl Plugin for DomainsPlugin {
     }
 }
 
-/// Прогревает wgpu-пайплайн для 3D-стрелок на старте, чтобы при первом клике не было фриза
 fn warmup_gizmos_shader(mut gizmos: Gizmos) {
     gizmos.arrow(Vec3::ZERO, Vec3::Y * 0.0001, Color::NONE);
 }
