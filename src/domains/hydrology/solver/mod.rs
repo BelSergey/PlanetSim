@@ -41,7 +41,7 @@ impl SurfaceNoise {
         let mut moisture_jitter = Vec::with_capacity(num_cells);
         let mut meander_field = Vec::with_capacity(num_cells);
 
-        for cell in &topology.cells {
+        for cell in topology.cells.iter() {
             let p = cell.center.as_dvec3();
 
             // Двухмасштабный шум для рваных природных границ (лесостепь / лесотундра)

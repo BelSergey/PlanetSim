@@ -15,7 +15,7 @@ fn rodrigues(axis: Vec3, v: Vec3, cos_a: f32, sin_a: f32) -> Vec3 {
 }
 
 pub(super) fn compute_season_pressure_and_winds(
-    season_mult:f32,
+    season_mult: f32,
     topology: &WorldTopology,
     geology: &GeologyLayer,
     continentality: &[f32],

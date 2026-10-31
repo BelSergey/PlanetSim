@@ -167,14 +167,13 @@ impl SolverPrecalc {
 
             // Предрасчет синоптических волн в атмосфере
             let p = pos.as_dvec3() * 4.5;
-            synoptic_noise_a
-                .push(synoptic_perlin.get([p.x + 13.5, p.y + 27.1, p.z + 41.9]) as f32);
-            synoptic_noise_b
-                .push(synoptic_perlin.get([p.x - 53.2, p.y + 18.4, p.z - 29.7]) as f32);
-            pressure_wave_noise.push(
-                synoptic_perlin.get([p.x * 0.65 + 71.0, p.y * 0.65 - 33.0, p.z * 0.65 + 12.0])
-                    as f32,
-            );
+            synoptic_noise_a.push(synoptic_perlin.get([p.x + 13.5, p.y + 27.1, p.z + 41.9]) as f32);
+            synoptic_noise_b.push(synoptic_perlin.get([p.x - 53.2, p.y + 18.4, p.z - 29.7]) as f32);
+            pressure_wave_noise.push(synoptic_perlin.get([
+                p.x * 0.65 + 71.0,
+                p.y * 0.65 - 33.0,
+                p.z * 0.65 + 12.0,
+            ]) as f32);
 
             for &n_id in &cell.neighbors {
                 let raw = topology.cells[n_id].center - pos;
@@ -295,7 +294,8 @@ pub fn simulate_all_seasons(
         });
         s.spawn(|_| {
             simulate_single_season(
-                -1.0, topology, geology, cont, surf_alb, surf_wet, surf_hc, config, &precalc, winter,
+                -1.0, topology, geology, cont, surf_alb, surf_wet, surf_hc, config, &precalc,
+                winter,
             );
         });
     });
@@ -313,6 +313,33 @@ pub fn simulate_all_seasons(
     }
 
     climate.apply_active_season(config.active_season);
+}
+
+/// Среднесуточная солнечная энергия на верхней границе атмосферы.
+///
+/// Результат нормирован относительно экватора в день равноденствия.
+/// Учитывает продолжительность дня, полярный день и полярную ночь.
+#[inline]
+fn daily_mean_insolation(
+    sin_lat: f32,
+    cos_lat: f32,
+    sin_declination: f32,
+    cos_declination: f32,
+) -> f32 {
+    let cos_lat = cos_lat.max(0.0);
+
+    // Косинус часового угла восхода / захода Солнца.
+    let denominator = (cos_lat * cos_declination).max(1e-7);
+
+    let cos_hour_angle = (-(sin_lat * sin_declination) / denominator).clamp(-1.0, 1.0);
+
+    let hour_angle = cos_hour_angle.acos();
+
+    // Интеграл солнечного потока за светлую часть суток.
+    let daylight =
+        hour_angle * sin_lat * sin_declination + cos_lat * cos_declination * hour_angle.sin();
+
+    daylight.max(0.0)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -338,7 +365,7 @@ fn simulate_single_season(
     for (i, surf_alb) in surface_albedo.iter().enumerate().take(num_cells) {
         let elev = geology.elevations[i];
         let base_insolation =
-            (precalc.cos_lat[i] * cos_sun + precalc.sin_lat[i] * sin_sun).max(0.0);
+            daily_mean_insolation(precalc.sin_lat[i], precalc.cos_lat[i], sin_sun, cos_sun);
 
         let temp_est =
             config.pole_temp + (config.equator_temp - config.pole_temp) * base_insolation;

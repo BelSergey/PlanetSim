@@ -123,8 +123,7 @@ pub(super) fn compute_soils(
         hydrology.soil_depth[i] = depth;
 
         // 6. Педотрансферные функции: Влагоемкость (WHC) и Водопроницаемость
-        let is_permafrost =
-            eff_mean_temp < config.permafrost_temp_threshold || eff_warm_temp < 3.0;
+        let is_permafrost = eff_mean_temp < config.permafrost_temp_threshold || eff_warm_temp < 3.0;
 
         // Ил и суглинки лучше всего удерживают доступную растениям воду; вулканический пепел (Andisol) повышает WHC
         let volcanic_bonus = if geology.volcano_mask[i] || rock == RockType::Andesite {

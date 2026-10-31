@@ -3,6 +3,9 @@
 use bevy::prelude::*;
 use bevy_egui::{EguiContext, EguiPlugin, EguiPrimaryContextPass, egui};
 
+use crate::astronomy::Sun;
+use crate::simulation::clock::SimulationClock;
+
 use crate::{
     domains::{
         climate::{climate_data::ClimateLayer, climate_ui::draw_climate_tab_system},
@@ -11,7 +14,7 @@ use crate::{
         save::{SaveLoadTask, SaveUiState, draw_save_load_windows_system},
         tectonics::{GeologyLayer, tectonics_ui::draw_tectonics_tab_system},
     },
-    viewport::{Globe, MapOverlay, ViewportViewConfig},
+    viewport::{Globe, MapOverlay, StarSystemRoot, ViewportViewConfig, camera_3d::SystemInertia},
     world::{
         WorldConfig,
         pipeline::{PipelineStage, WorldPipeline},
@@ -57,7 +60,7 @@ impl Plugin for UiPlugin {
 fn manage_scene_visibility(
     state: Res<State<AppState>>,
     geology: Res<GeologyLayer>,
-    mut q_globe: Query<&mut Visibility, With<Globe>>,
+    mut q_globe: Query<&mut Visibility, Or<(With<Globe>, With<Sun>)>>,
 ) {
     let should_show = *state.get() == AppState::InGame && !geology.elevations.is_empty();
     let target_vis = if should_show {
@@ -394,6 +397,7 @@ fn render_ui_shell(world: &mut World) -> Result {
     let ctx = egui_ctx.get_mut().clone();
 
     let rect = ctx.content_rect();
+    let mut reset_system_view = false;
 
     egui::Area::new(egui::Id::new("root_ui_shell"))
         .fixed_pos(rect.min)
@@ -442,7 +446,15 @@ fn render_ui_shell(world: &mut World) -> Result {
                         {
                             trigger_new_gen = true;
                         }
+                        ui.separator();
 
+                        if ui
+                            .button("↺ Исходный вид")
+                            .on_hover_text("Вернуть звёздную систему к исходной ориентации")
+                            .clicked()
+                        {
+                            reset_system_view = true;
+                        }
                         if trigger_new_gen {
                             let subdivs = {
                                 let mut cfg = world.resource_mut::<WorldConfig>();
@@ -469,6 +481,71 @@ fn render_ui_shell(world: &mut World) -> Result {
                             .is_some();
 
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            // Управление модельным временем
+                            world.resource_scope(|_world, mut clock: Mut<SimulationClock>| {
+                                let started = clock.is_started();
+
+                                let speed_options = [
+                                    (1.0, "1 сек/с"),
+                                    (10.0, "10 сек/с"),
+                                    (100.0, "100 сек/с"),
+                                    (3_600.0, "1 час/с"),
+                                    (86_400.0, "1 день/с"),
+                                    (864_000.0, "10 дней/с"),
+                                ];
+
+                                let mut selected_speed = "Своя скорость";
+
+                                for (speed, label) in speed_options {
+                                    if (clock.time_scale - speed).abs() < 0.01 {
+                                        selected_speed = label;
+                                    }
+                                }
+
+                                if started {
+                                    ui.label(format!(
+                                        "Время: {:.2} д.",
+                                        clock.elapsed_seconds / 86_400.0
+                                    ));
+                                } else {
+                                    ui.weak("Ожидание планеты");
+                                }
+
+                                ui.add_enabled_ui(started, |ui| {
+                                    let pause_label = if clock.paused {
+                                        "▶ Продолжить"
+                                    } else {
+                                        "⏸ Пауза"
+                                    };
+
+                                    if ui.button(pause_label).clicked() {
+                                        if clock.paused {
+                                            clock.resume();
+                                        } else {
+                                            clock.pause();
+                                        }
+                                    }
+
+                                    egui::ComboBox::from_id_salt("simulation_speed")
+                                        .selected_text(selected_speed)
+                                        .width(105.0)
+                                        .show_ui(ui, |ui| {
+                                            for (speed, label) in speed_options {
+                                                if ui
+                                                    .selectable_label(
+                                                        (clock.time_scale - speed).abs() < 0.01,
+                                                        label,
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    clock.set_speed(speed);
+                                                }
+                                            }
+                                        });
+                                });
+
+                                ui.separator();
+                            });
                             if let Some((title, in_progress)) = active_save_load {
                                 ui.colored_label(
                                     egui::Color32::from_rgb(240, 200, 80),
@@ -718,9 +795,7 @@ fn render_ui_shell(world: &mut World) -> Result {
                                 if ui
                                     .add_sized(
                                         [ui.available_width(), 34.0],
-                                        egui::Button::new(
-                                            "🔄 Перегенерировать с введённым сидом",
-                                        ),
+                                        egui::Button::new("🔄 Перегенерировать с введённым сидом"),
                                     )
                                     .clicked()
                                 {
@@ -751,6 +826,16 @@ fn render_ui_shell(world: &mut World) -> Result {
                 });
         });
 
+    // Сброс ориентации всей звёздной системы.
+    if reset_system_view {
+        let mut query =
+            world.query_filtered::<(&mut Transform, &mut SystemInertia), With<StarSystemRoot>>();
+
+        if let Ok((mut transform, mut inertia)) = query.single_mut(world) {
+            *transform = Transform::default();
+            inertia.velocity = Vec2::ZERO;
+        }
+    }
     // Отрисовка модальных окон сохранения/загрузки и диалога догенерации
     let _ = world.run_system_cached_with(draw_save_load_windows_system, ctx);
 

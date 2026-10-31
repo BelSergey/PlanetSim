@@ -1,7 +1,8 @@
 // src/viewport/camera_3d.rs
 
-use super::Globe;
+use super::StarSystemRoot;
 use crate::world::WorldConfig;
+
 #[cfg(target_os = "macos")]
 use bevy::input::gestures::PinchGesture;
 use bevy::{
@@ -10,43 +11,49 @@ use bevy::{
 };
 
 #[derive(Component, Default)]
-pub struct GlobeInertia {
+pub struct SystemInertia {
     pub velocity: Vec2,
 }
 
-pub fn rotate_globe(
-    mut query: Query<(&mut Transform, &mut GlobeInertia), With<Globe>>,
+/// Вращает всю звёздную систему мышью с инерцией.
+pub fn rotate_system(
+    mut query: Query<(&mut Transform, &mut SystemInertia), With<StarSystemRoot>>,
     mouse_button: Res<ButtonInput<MouseButton>>,
     accumulated_mouse: Res<AccumulatedMouseMotion>,
     time: Res<Time>,
 ) {
     let dt = time.delta_secs();
+
     if dt == 0.0 {
         return;
     }
 
-    if let Ok((mut transform, mut inertia)) = query.single_mut() {
-        let sensitivity = 0.005;
+    let Ok((mut transform, mut inertia)) = query.single_mut() else {
+        return;
+    };
 
-        if mouse_button.pressed(MouseButton::Left) {
-            let current_velocity = accumulated_mouse.delta / dt;
-            inertia.velocity = inertia.velocity.lerp(current_velocity, 15.0 * dt);
-        } else {
-            let friction = 3.0;
-            inertia.velocity *= (-friction * dt).exp();
-            if inertia.velocity.length() < 1.0 {
-                inertia.velocity = Vec2::ZERO;
-            }
+    let sensitivity = 0.005;
+
+    if mouse_button.pressed(MouseButton::Left) {
+        let current_velocity = accumulated_mouse.delta / dt;
+        inertia.velocity = inertia.velocity.lerp(current_velocity, 15.0 * dt);
+    } else {
+        let friction = 3.0;
+        inertia.velocity *= (-friction * dt).exp();
+
+        if inertia.velocity.length() < 1.0 {
+            inertia.velocity = Vec2::ZERO;
         }
+    }
 
-        if inertia.velocity != Vec2::ZERO {
-            let frame_delta = inertia.velocity * dt;
-            let yaw = Quat::from_rotation_y(frame_delta.x * sensitivity);
-            let pitch = Quat::from_rotation_x(frame_delta.y * sensitivity);
+    if inertia.velocity != Vec2::ZERO {
+        let frame_delta = inertia.velocity * dt;
 
-            transform.rotation = yaw * pitch * transform.rotation;
-            transform.rotation = transform.rotation.normalize();
-        }
+        let yaw = Quat::from_rotation_y(frame_delta.x * sensitivity);
+        let pitch = Quat::from_rotation_x(frame_delta.y * sensitivity);
+
+        transform.rotation = yaw * pitch * transform.rotation;
+        transform.rotation = transform.rotation.normalize();
     }
 }
 

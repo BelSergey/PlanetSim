@@ -186,7 +186,7 @@ pub(super) fn draw_wind_arrows_gizmos(
     climate: Res<ClimateLayer>,
     view_config: Res<ViewportViewConfig>,
     world_config: Res<WorldConfig>,
-    globe_query: Query<&Transform, With<Globe>>,
+    globe_query: Query<&GlobalTransform, With<Globe>>,
 ) {
     if !view_config.show_wind_arrows
         || climate.wind_arrows_cache.is_empty()
@@ -194,9 +194,11 @@ pub(super) fn draw_wind_arrows_gizmos(
     {
         return;
     }
-    let Ok(globe_transform) = globe_query.single() else {
+    let Ok(global_transform) = globe_query.single() else {
         return;
     };
+
+    let globe_transform = global_transform.compute_transform();
 
     let r = world_config.radius;
     let base_len = r * 0.08;
@@ -226,7 +228,7 @@ pub(super) fn draw_ocean_currents_gizmos(
     climate: Res<ClimateLayer>,
     view_config: Res<ViewportViewConfig>,
     world_config: Res<WorldConfig>,
-    globe_query: Query<&Transform, With<Globe>>,
+    globe_query: Query<&GlobalTransform, With<Globe>>,
 ) {
     if !view_config.show_ocean_currents
         || climate.current_arrows_cache.is_empty()
@@ -234,10 +236,11 @@ pub(super) fn draw_ocean_currents_gizmos(
     {
         return;
     }
-    let Ok(globe_transform) = globe_query.single() else {
+    let Ok(global_transform) = globe_query.single() else {
         return;
     };
 
+    let globe_transform = global_transform.compute_transform();
     let r = world_config.radius;
     let base_len = r * 0.07;
 

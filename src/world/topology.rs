@@ -1,7 +1,7 @@
 // src/world/topology.rs
 
 use bevy::prelude::*;
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 pub type CellId = usize;
 
@@ -20,7 +20,8 @@ pub struct TopologicalCell {
 #[derive(Resource, Clone)]
 pub struct WorldTopology {
     pub subdivisions: u32,
-    pub cells: Vec<TopologicalCell>,
+    /// Неизменяемая топология разделяется между ECS и фоновыми задачами без глубокого клонирования.
+    pub cells: Arc<[TopologicalCell]>,
 }
 
 impl WorldTopology {
@@ -37,7 +38,7 @@ impl WorldTopology {
 
         Self {
             subdivisions,
-            cells,
+            cells: Arc::from(cells),
         }
     }
 
@@ -176,11 +177,19 @@ impl WorldTopology {
                 d.dot(bitangent).atan2(d.dot(tangent))
             };
 
-            let mut corners: Vec<Vec3> = incident_faces[i]
+            // Угол каждого угла ячейки вычисляем один раз: sort comparator вызывается многократно.
+            let mut corners_with_angles: Vec<(f32, Vec3)> = incident_faces[i]
                 .iter()
-                .map(|&f_idx| face_centers[f_idx])
+                .map(|&f_idx| {
+                    let corner = face_centers[f_idx];
+                    (angle_around_center(corner), corner)
+                })
                 .collect();
-            corners.sort_by(|a, b| angle_around_center(*a).total_cmp(&angle_around_center(*b)));
+            corners_with_angles.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let corners: Vec<Vec3> = corners_with_angles
+                .into_iter()
+                .map(|(_, corner)| corner)
+                .collect();
 
             let n = corners.len();
             let mut ordered_neighbors = Vec::with_capacity(n);
