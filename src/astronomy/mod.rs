@@ -1,3 +1,4 @@
+use crate::world::WorldConfig;
 use bevy::prelude::*;
 use std::f64::consts::TAU;
 
@@ -64,10 +65,30 @@ impl Plugin for AstronomyPlugin {
 /// Обновляет орбитальное положение, наклон оси и суточное вращение.
 fn update_orbits(
     clock: Res<SimulationClock>,
-    mut query: Query<(&Orbit, &AxialRotation, &mut Transform)>,
+    world_config: Res<WorldConfig>,
+    mut last_system_scale: Local<Option<f32>>,
+    mut query: Query<(&Orbit, &AxialRotation, &mut Transform), Without<Sun>>,
+    mut sun_query: Query<&mut Transform, (With<Sun>, Without<Orbit>)>,
 ) {
-    // Орбита и суточное вращение не меняются на паузе.
-    if clock.paused {
+    let system_scale = world_config.system_scale();
+
+    // Проверяем изменение реального масштаба, а не факт обращения к ресурсу.
+    let scale_changed = match *last_system_scale {
+        Some(last) => (last - system_scale).abs() > 1e-6,
+        None => true,
+    };
+
+    if scale_changed {
+        *last_system_scale = Some(system_scale);
+
+        // Масштабируем видимое Солнце.
+        if let Ok(mut sun_transform) = sun_query.single_mut() {
+            sun_transform.scale = Vec3::splat(system_scale);
+        }
+    }
+
+    // На паузе обновляем систему только при изменении масштаба.
+    if clock.paused && !scale_changed {
         return;
     }
 
@@ -77,10 +98,13 @@ fn update_orbits(
         let orbit_angle = (orbit.phase_at_epoch - clock.elapsed_seconds / orbit_period * TAU)
             .rem_euclid(TAU) as f32;
 
+        // Орбита масштабируется вместе с планетой.
+        let orbit_radius = orbit.visual_radius * system_scale;
+
         transform.translation = Vec3::new(
-            orbit.visual_radius * orbit_angle.cos(),
+            orbit_radius * orbit_angle.cos(),
             0.0,
-            orbit.visual_radius * orbit_angle.sin(),
+            orbit_radius * orbit_angle.sin(),
         );
 
         let rotation_period = axial.rotation_period_seconds.max(1.0);
@@ -88,19 +112,12 @@ fn update_orbits(
         let spin_angle = (clock.elapsed_seconds / rotation_period * std::f64::consts::TAU)
             .rem_euclid(std::f64::consts::TAU) as f32;
 
-        // Орбитальная плоскость XZ, её нормаль — ось Y.
-        // Поворот вокруг Z создаёт наклон 23,44°.
         let axial_tilt = Quat::from_rotation_z(axial.obliquity_radians);
-
-        // Суточное вращение вокруг собственной оси Y.
         let daily_spin = Quat::from_rotation_y(spin_angle);
 
-        // Наклон остаётся постоянным в пространстве,
-        // а планета вращается вокруг наклонённой оси.
         transform.rotation = axial_tilt * daily_spin;
     }
 }
-
 /// Направляет солнечный свет от Солнца к планете.
 fn update_sunlight_direction(
     planet_query: Query<&Transform, (With<Orbit>, Without<Sunlight>, Changed<Transform>)>,
