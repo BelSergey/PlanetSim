@@ -53,6 +53,8 @@ pub struct MantlePlume {
     pub radius: f32,
     pub pulse_timer: f32,
     pub pulse_period: f32,
+    /// Накопленный угловой дрейф коры над плюмом с момента последнего извержения (рад)
+    pub accum_drift_rad: f32,
     /// Дистанция дрейфа плиты до следующего извержения (меняется стохастически после каждого выброса)
     pub next_eruption_dist: f32,
     /// Счётчик извержений плюма для детерминированной вариации высоты/радиуса/пауз
@@ -169,9 +171,11 @@ impl GeologyLayer {
         self.terrain_ruggedness.resize(num_cells, 0.0);
     }
 
+    /// Проверяет, является ли кора континентальной (по низкой плотности фельзического кратона).
+    /// Не использует порог толщины `18.5`, чтобы утолщенные океанические дуги не красились как материк!
     #[inline]
     pub fn is_continental_crust(&self, cell_id: usize) -> bool {
-        self.crust_density[cell_id] < 2825.0 || self.crust_thickness[cell_id] >= 18.5
+        self.crust_density[cell_id] < 2835.0
     }
 
     /// Истина, если клетка принадлежит настоящему океану (а не сухой впадине на суше)

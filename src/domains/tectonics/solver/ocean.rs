@@ -23,14 +23,13 @@ pub fn compute_oceans_and_continentality(
     let mut visited = vec![false; num_cells];
     let mut is_major_land = vec![false; num_cells];
 
-    // 1. Flood Fill по связным областям с elev <= 0.0:
+    // 1. Flood Fill только по связным водным/низменным областям с elev <= 0.0:
     // Проверяем и площадь бассейна, и наличие хотя бы одной глубоководной (абиссальной) клетки
     for i in 0..num_cells {
-        if visited[i] {
+        if visited[i] || geology.elevations[i] > 0.0 {
             continue;
         }
 
-        let below_zero = geology.elevations[i] <= 0.0;
         let mut current_body = Vec::new();
         let mut min_elev_in_body = geology.elevations[i];
         let mut stack = vec![i];
@@ -44,40 +43,33 @@ pub fn compute_oceans_and_continentality(
             }
 
             for &neighbor_id in &topology.cells[cell_id].neighbors {
-                let neighbor_below_zero = geology.elevations[neighbor_id] <= 0.0;
-                if neighbor_below_zero == below_zero && !visited[neighbor_id] {
+                if geology.elevations[neighbor_id] <= 0.0 && !visited[neighbor_id] {
                     visited[neighbor_id] = true;
                     stack.push(neighbor_id);
                 }
             }
         }
 
-        if below_zero {
-            let is_true_ocean = current_body.len() >= min_ocean_cells
-                && min_elev_in_body <= config.ocean_abyssal_threshold;
+        let is_true_ocean = current_body.len() >= min_ocean_cells
+            && min_elev_in_body <= config.ocean_abyssal_threshold;
 
-            if is_true_ocean {
-                for cell_id in current_body {
-                    geology.is_ocean[cell_id] = true;
-                }
-            } else {
-                // Пункт 5: Запертый внутри материка остаточный бассейн (не прошедший в океаны).
-                for cell_id in current_body {
-                    geology.is_ocean[cell_id] = false;
-                    let h = geology.elevations[cell_id];
-                    if h < config.trapped_basin_floor_elev {
-                        let infill = config.trapped_basin_floor_elev - h;
-                        geology.sediment_thickness[cell_id] += infill * 14.0;
-                        geology.crust_density[cell_id] =
-                            geology.crust_density[cell_id].min(2760.0);
-                        geology.elevations[cell_id] =
-                            config.trapped_basin_floor_elev + (h - min_elev_in_body) * 0.12;
-                    }
-                }
-            }
-        } else if current_body.len() >= min_land_cells {
+        if is_true_ocean {
             for cell_id in current_body {
-                is_major_land[cell_id] = true;
+                geology.is_ocean[cell_id] = true;
+            }
+        } else {
+            // Запертый внутри материка остаточный бассейн (заполняется осадками снизу до trapped_basin_floor_elev без инверсии краёв)
+            for cell_id in current_body {
+                geology.is_ocean[cell_id] = false;
+                let h = geology.elevations[cell_id];
+                if h < config.trapped_basin_floor_elev {
+                    let infill = config.trapped_basin_floor_elev - h;
+                    geology.sediment_thickness[cell_id] += infill * 14.0;
+                    geology.crust_density[cell_id] =
+                        geology.crust_density[cell_id].min(2760.0);
+                    geology.elevations[cell_id] =
+                        config.trapped_basin_floor_elev - infill * 0.12;
+                }
             }
         }
     }

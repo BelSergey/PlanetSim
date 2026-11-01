@@ -13,8 +13,7 @@ pub use isostasy::step_elevation_diffusion;
 pub use lithology::finalize_tectonics;
 
 use super::{tectonics_config::TectonicsConfig, tectonics_data::GeologyLayer};
-use crate::world::topology::WorldTopology;
-use crate::domains::generator::GenerationLogger;
+use crate::{domains::generator::GenerationLogger, world::topology::WorldTopology};
 use bevy::math::Vec3;
 use noise::{Fbm, NoiseFn, Perlin};
 use std::f32::consts::PI;
@@ -37,14 +36,13 @@ pub struct TectonicsGeometryCache {
     pub edge_neighbors: Vec<usize>,
     /// Точное угловое расстояние между клеткой и соседом в радианах
     pub edge_dists_rad: Vec<f32>,
-    /// Единичный касательный вектор на сфере из центра клетки в сторону соседа
+    /// Единичный геодезический вектор в касательной плоскости сферы из центра клетки `i` к центру соседа `j`
     pub edge_tangent_dirs: Vec<Vec3>,
 }
 
 static GEOMETRY_CACHE: OnceLock<Mutex<Option<Arc<TectonicsGeometryCache>>>> = OnceLock::new();
 
 impl TectonicsGeometryCache {
-    /// Возвращает закэшированную геометрию для текущей сетки или строит её за один проход
     pub fn get_or_build(topology: &WorldTopology) -> Arc<Self> {
         let mutex = GEOMETRY_CACHE.get_or_init(|| Mutex::new(None));
         if let Ok(guard) = mutex.lock() {
@@ -79,12 +77,12 @@ impl TectonicsGeometryCache {
                 let r_j = topology.cells[n_id].center;
                 let dot = r_i.dot(r_j).clamp(-1.0, 1.0);
                 let dist_rad = dot.acos().max(1e-5);
-                // Проекция направления на касательную плоскость сферы в точке r_i
-                let tangent = (r_j - r_i * dot).normalize_or_zero();
+                // Единичное направление геодезической от клетки i к соседу n_id в касательной плоскости сферы
+                let dir_to_neighbor = (r_j - r_i * dot).normalize_or_zero();
 
                 edge_neighbors.push(n_id);
                 edge_dists_rad.push(dist_rad);
-                edge_tangent_dirs.push(tangent);
+                edge_tangent_dirs.push(dir_to_neighbor);
             }
             edge_offsets.push(edge_neighbors.len());
         }
@@ -111,15 +109,14 @@ pub struct TectonicsScratch {
     pub next_orogeny: Vec<f32>,
     pub next_shift: Vec<[f32; 3]>,
 
-    /// Конвергенция на границе (> 0 сжатие, < 0 растяжение)
     pub boundary_convergence: Vec<f32>,
-    /// Касательная сдвиговая скорость вдоль границы (трансформные разломы)
     pub boundary_shear: Vec<f32>,
-    /// Соседняя плита через ближайшую границу (`usize::MAX`, если клетка внутри плиты)
     pub neighbor_plate: Vec<usize>,
-    /// Единичная нормаль к границе (в сторону соседней плиты)
     pub boundary_normal: Vec<Vec3>,
-    /// Временный буфер высот для эрозии/диффузии
+    /// Континентальность коры соседней плиты напротив данной клетки `[0.0 .. 1.0]`
+    pub neighbor_continental: Vec<f32>,
+    /// Истина, если в данной паре плит текущая плита является нижней (погружающейся в желоб)
+    pub is_subducting_slab: Vec<bool>,
     pub temp_elevations: Vec<f32>,
 }
 
@@ -136,17 +133,17 @@ impl TectonicsScratch {
         self.boundary_shear.resize(num_cells, 0.0);
         self.neighbor_plate.resize(num_cells, usize::MAX);
         self.boundary_normal.resize(num_cells, Vec3::ZERO);
+        self.neighbor_continental.resize(num_cells, 0.0);
+        self.is_subducting_slab.resize(num_cells, false);
         self.temp_elevations.resize(num_cells, 0.0);
     }
 }
 
-/// Однопроходная функция одного периода тектонического движения (готова для реалтайма):
+/// Однопроходная функция одного периода тектонического движения (без дублирования проходов):
 /// 1. Силы (Slab pull + Ridge push + Collision resistance + Mantle drag + Plumes) -> скорости плит
-/// 2. Адвекция коры и вулканов по сфере + баланс поглощения/раскола плит
-/// 3. Классификация границ
-/// 4. Изменение коры (спрединг, субдукция, коллизия, рифтинг) + рождение вулканов над плюмами
-/// 5. Изостазия Эйри и динамическая топография желобов
-/// 6. Термическая эрозия и накопление осадков
+/// 2. Непрерывная адвекция плит, кратонов, вулканов и полей коры по сфере
+/// 3. Единый проход границ, орогенеза, возраста океанической коры и рождения вулканов над плюмами
+/// 4. Изостазия и эрозия
 pub fn step_tectonics(
     topology: &WorldTopology,
     cache: &TectonicsGeometryCache,
@@ -158,25 +155,21 @@ pub fn step_tectonics(
     let num_cells = topology.cells.len();
     scratch.ensure_size(num_cells);
 
-    // 1. Детектируем текущие границы плит и считаем суммарные силы/моменты вращения плит
-    boundaries::detect_plate_boundaries(topology, cache, geology, scratch);
+    // 1. Обновляем угловые скорости плит по данным границ в `scratch`
     forces::update_plate_velocities(topology, cache, geology, scratch, config, dt);
 
-    // 2. Переносим кору и вулканы по сфере, проверяем поглощение и раскол плит
+    // 2. Переносим плиты, вулканы и поля коры по сфере
     advection::advect_crust_and_plates(topology, cache, geology, scratch, config, dt);
 
-    // 3–4. Обновляем границы после сдвига, модифицируем кору (спрединг/субдукция/коллизия) и плюмы
-    boundaries::detect_plate_boundaries(topology, cache, geology, scratch);
+    // 3. Единым проходом обновляем границы (и в `geology`, и в `scratch`), возраст коры и плюмы
     boundaries::apply_boundary_and_plume_processes(topology, cache, geology, scratch, config, dt);
 
-    // 5–6. Пересчитываем рельеф через изостазию и применяем эрозию с осадконакоплением
+    // 4. Пересчитываем рельеф через изостазию и применяем мягкую эрозию
     isostasy::update_isostasy_and_erosion(topology, cache, geology, scratch, config, dt);
 
     geology.sim_step = geology.sim_step.wrapping_add(1);
 }
 
-/// Главная функция генерации тектоники: инициализирует смешанные плиты,
-/// в цикле прогоняет `step_tectonics`, а затем накладывает шум, породы, океаны и континентальность
 pub fn simulate_tectonics(
     topology: &WorldTopology,
     geology: &mut GeologyLayer,
@@ -186,11 +179,10 @@ pub fn simulate_tectonics(
 ) {
     let cache = TectonicsGeometryCache::get_or_build(topology);
     let mut scratch = TectonicsScratch::default();
+    scratch.ensure_size(topology.cells.len());
 
-    // 0. Инициализируем начальные смешанные плиты, кратоны и стационарные плюмы
-    init::init_tectonics(topology, &cache, geology, noise, config);
+    init::init_tectonics(topology, &cache, geology, &mut scratch, noise, config);
 
-    // 1..N. Цикл пошагового движения плит
     let steps = config.simulation_steps;
     let dt = config.time_step;
     logger.start_step(format!(
@@ -201,7 +193,6 @@ pub fn simulate_tectonics(
         step_tectonics(topology, &cache, geology, &mut scratch, config, dt);
     }
 
-    // Финализация: горный и детальный шум, умный поиск океанов, континентальность и породы
     lithology::finalize_tectonics(topology, &cache, geology, noise, config, Some(logger));
 }
 
@@ -218,15 +209,19 @@ pub fn step_tectonics_realtime(
     }
     let cache = TectonicsGeometryCache::get_or_build(topology);
     let mut scratch = TectonicsScratch::default();
+    scratch.ensure_size(topology.cells.len());
     let perlin = Fbm::<Perlin>::new(42);
 
-    step_tectonics(
-        topology,
-        &cache,
-        geology,
-        &mut scratch,
-        config,
-        config.time_step,
-    );
+    // Инициализируем граничные векторы в scratch для расчёта сил в step_tectonics
+    boundaries::project_plates_and_boundaries(topology, &cache, geology, &mut scratch, config, 0.0);
+
+    // Выполняем фазы шага без повторного пересчёта project_plates_and_boundaries до адвекции
+    let dt = config.time_step;
+    forces::update_plate_velocities(topology, &cache, geology, &scratch, config, dt);
+    advection::advect_crust_and_plates(topology, &cache, geology, &mut scratch, config, dt);
+    boundaries::apply_boundary_and_plume_processes(topology, &cache, geology, &mut scratch, config, dt);
+    isostasy::update_isostasy_and_erosion(topology, &cache, geology, &mut scratch, config, dt);
+    geology.sim_step = geology.sim_step.wrapping_add(1);
+
     lithology::finalize_tectonics(topology, &cache, geology, &perlin, config, Some(logger));
 }

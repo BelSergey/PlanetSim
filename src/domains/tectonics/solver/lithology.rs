@@ -1,8 +1,8 @@
 // src/domains/tectonics/solver/lithology.rs
 
 use super::{
-    isostasy::step_elevation_diffusion, ocean::compute_oceans_and_continentality,
-    TectonicsGeometryCache,
+    boundaries::fast_domain_warp, isostasy::step_elevation_diffusion,
+    ocean::compute_oceans_and_continentality, smoothstep, TectonicsGeometryCache,
 };
 use crate::{
     domains::{
@@ -36,6 +36,7 @@ pub fn finalize_tectonics(
         let stress = &geology.tectonic_stress;
         let elevations = &mut geology.elevations;
         let volcano_mask = &mut geology.volcano_mask;
+        let profile_pow = config.volcano_profile_pow.max(1);
 
         elevations
             .par_iter_mut()
@@ -43,6 +44,14 @@ pub fn finalize_tectonics(
             .enumerate()
             .for_each(|(i, (elev_out, mask_out))| {
                 let dir = topology.cells[i].center;
+                // Искажённое направление границ плит (совпадает с boundaries.rs и classify_physical_lithology)
+                let boundary_warped = fast_domain_warp(
+                    dir,
+                    config.warp_scale as f32,
+                    config.warp_strength,
+                );
+                let bw_dvec = boundary_warped.as_dvec3();
+
                 let p = dir.as_dvec3() * config.warp_scale;
                 let offsets = &config.warp_offsets;
 
@@ -66,31 +75,30 @@ pub fn finalize_tectonics(
                     (dir + Vec3::new(wx, wy, wz) * config.warp_strength).normalize_or_zero();
                 let w_dvec = warped_dir.as_dvec3();
 
-                // Мультифрактальный горный шум (работает только в зонах реального орогенеза)
+                // Мультифрактальный горный шум вычисляется в пространстве `bw_dvec`, согласованном с `orogeny[i]`
                 let m_scale = config.boundary_noise_scale;
                 let raw_m1 = noise.get([
-                    w_dvec.x * m_scale,
-                    w_dvec.y * m_scale,
-                    w_dvec.z * m_scale,
+                    bw_dvec.x * m_scale,
+                    bw_dvec.y * m_scale,
+                    bw_dvec.z * m_scale,
                 ]) as f32;
                 let raw_m2 = noise.get([
-                    w_dvec.x * (m_scale * 2.1) + 19.3,
-                    w_dvec.y * (m_scale * 2.1) - 27.8,
-                    w_dvec.z * (m_scale * 2.1) + 11.4,
+                    bw_dvec.x * (m_scale * 2.1) + 19.3,
+                    bw_dvec.y * (m_scale * 2.1) - 27.8,
+                    bw_dvec.z * (m_scale * 2.1) + 11.4,
                 ]) as f32;
                 let ridge_crest = (1.0 - raw_m1.abs()) * (0.65 + 0.35 * (1.0 - raw_m2.abs()));
                 let mtn_mod = (ridge_crest.powf(1.25) - 0.25) * config.boundary_noise_amp;
-                let orog_addition = orogeny[i] * mtn_mod * 0.75;
+                let orog_addition = orogeny[i] * mtn_mod;
 
-                // На спрединге в океане добавляем только мелкую поперечную шероховатость,
-                // строго не поднимая хребет выше -0.06 (никаких островов от спрединга!)
-                let rift_addition = if stress[i] < -0.05 && *elev_out < -0.08 {
-                    (-stress[i]).clamp(0.0, 1.0) * (raw_m2 * 0.04)
+                // На спрединге в океане добавляем только мелкую шероховатость, строго не поднимая хребет выше -0.06
+                let rift_addition = if stress[i] < -0.05 && *elev_out < -0.10 {
+                    (-stress[i]).clamp(0.0, 1.0) * (raw_m2 * 0.035)
                 } else {
                     0.0
                 };
 
-                // Щитовые вулканические острова и стратовулканы горячих точек
+                // Щитовые вулканические острова и стратовулканы с учётом `volcano_profile_pow` и `volcano_noise_base`
                 let v_scale = config.volcano_noise_scale;
                 let raw_v1 = noise.get([
                     w_dvec.x * v_scale,
@@ -109,7 +117,7 @@ pub fn finalize_tectonics(
                     .normalize_or_zero();
 
                 let base_h = *elev_out;
-                let mut best_volcano_target = base_h;
+                let mut surface_h = base_h;
                 let mut is_volc = false;
 
                 for v in volcanoes {
@@ -123,10 +131,10 @@ pub fn finalize_tectonics(
                         let dome = (1.0 - r_norm * r_norm).max(0.0);
                         let shoulder = smoothstep(1.0 - r_norm);
                         let cone_shape = dome * (0.45 + 0.55 * age_flatten)
-                            + shoulder.powi(2) * (0.55 - 0.55 * age_flatten);
+                            + shoulder.powi(profile_pow) * (0.55 - 0.55 * age_flatten);
 
-                        let ridges = 0.78
-                            + 0.32 * (1.0 - raw_v2.abs())
+                        let ridges = config.volcano_noise_base
+                            + (1.0 - config.volcano_noise_base) * (1.0 - raw_v2.abs())
                             + config.volcano_noise_mult * raw_v1;
 
                         let volcano_target_h = if base_h < 0.0 {
@@ -136,8 +144,8 @@ pub fn finalize_tectonics(
                             base_h + v.height * 0.65 * cone_shape * ridges
                         };
 
-                        if volcano_target_h > best_volcano_target {
-                            best_volcano_target = volcano_target_h;
+                        if volcano_target_h > surface_h {
+                            surface_h = volcano_target_h;
                         }
                         if r_norm < 0.48 && volcano_target_h > 0.02 {
                             is_volc = true;
@@ -146,6 +154,7 @@ pub fn finalize_tectonics(
                 }
                 *mask_out = is_volc;
 
+                // Оба масштаба детального шума берутся в согласованном искаженном пространстве `w_dvec`!
                 let d_scale = config.detail_noise_scale;
                 let detail_macro = noise.get([
                     w_dvec.x * d_scale,
@@ -153,19 +162,21 @@ pub fn finalize_tectonics(
                     w_dvec.z * d_scale,
                 ]) as f32;
                 let detail_micro = noise.get([
-                    dir.x as f64 * (d_scale * 2.7) + 41.2,
-                    dir.y as f64 * (d_scale * 2.7) - 19.8,
-                    dir.z as f64 * (d_scale * 2.7) + 63.5,
+                    w_dvec.x * (d_scale * 2.7) + 41.2,
+                    w_dvec.y * (d_scale * 2.7) - 19.8,
+                    w_dvec.z * (d_scale * 2.7) + 63.5,
                 ]) as f32;
                 let raw_detail = detail_macro * 0.70 + detail_micro * 0.30;
 
-                let detail_combined = if best_volcano_target > 0.0 && orogeny[i] < 0.25 {
+                // На спокойных безгорных равнинах суши смещаем шум слегка вверх (меньше бессточных ям)
+                let is_flat_lowland = base_h > 0.0 && !is_volc && orogeny[i] < 0.25;
+                let detail_combined = if is_flat_lowland {
                     (raw_detail.max(-0.25) + 0.05) * config.detail_noise_amp * 0.28
                 } else {
                     raw_detail * config.detail_noise_amp * 0.42
                 };
 
-                let h = best_volcano_target + orog_addition + rift_addition + detail_combined;
+                let h = surface_h + orog_addition + rift_addition + detail_combined;
                 *elev_out = h.max(config.elevation_min_clamp);
             });
     }
@@ -188,12 +199,6 @@ pub fn finalize_tectonics(
     compute_terrain_ruggedness(topology, cache, geology, noise);
 }
 
-#[inline]
-fn smoothstep(t: f32) -> f32 {
-    let t = t.clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
-}
-
 fn classify_physical_lithology(
     topology: &WorldTopology,
     cache: &TectonicsGeometryCache,
@@ -213,6 +218,8 @@ fn classify_physical_lithology(
     let lithology = &mut geology.lithology;
 
     let ref_rad = cache.avg_cell_rad;
+    let warp_scale = config.warp_scale as f32;
+    let warp_strength = config.warp_strength;
 
     lithology
         .par_iter_mut()
@@ -228,7 +235,9 @@ fn classify_physical_lithology(
             let ocean_cell = is_ocean[i];
             let lat_abs = topology.cells[i].lat_lon.x.abs();
 
-            let d = topology.cells[i].center.as_dvec3();
+            // Используем те же искаженные координаты `warped_dir`, что и для границ/орогенеза
+            let warped_dir = fast_domain_warp(topology.cells[i].center, warp_scale, warp_strength);
+            let d = warped_dir.as_dvec3();
             let l_noise =
                 noise.get([d.x * 6.5 + 31.7, d.y * 6.5 - 19.3, d.z * 6.5 + 47.1]) as f32;
 

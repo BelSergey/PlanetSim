@@ -180,14 +180,14 @@ impl Default for TectonicsConfig {
             volcano_noise_base: 0.82,
             volcano_noise_mult: 0.22,
 
-            warp_strength: 0.42,
-            warp_scale: 1.6,
+            warp_strength: 0.64,
+            warp_scale: 0.8,
             warp_offsets: [[12.3, 45.6, 78.9], [98.7, 65.4, 32.1], [55.5, 11.1, 99.9]],
             boundary_noise_scale: 14.0,
             boundary_noise_base: 0.65,
-            boundary_noise_amp: 0.55,
+            boundary_noise_amp: 0.75,
             detail_noise_scale: 4.5,
-            detail_noise_amp: 0.2,
+            detail_noise_amp: 1.2,
             elevation_min_clamp: -0.90,
 
             min_ocean_size_ratio: 0.015,

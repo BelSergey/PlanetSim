@@ -7,13 +7,10 @@ use crate::{
 };
 use rayon::prelude::*;
 
-/// Пассивный гипсометрический профиль от центра кратона (c = 1.0) через шельф к океану (c = 0.0):
-/// - c in 0.55..1.0: материковая равнина (+0.12) плавно спускается к береговой линии (0.0)
-/// - c in 0.28..0.55: мелководный континентальный шельф (0.0 .. -0.065)
-/// - c in 0.00..0.28: континентальный склон (-0.065 .. ocean_base_height -0.35)
+/// Пассивный гипсометрический профиль от центра кратона (c = 1.0) через шельф к океану (c = 0.0)
 #[inline]
 fn passive_hypsometric_curve(c: f32, cont_base: f32, ocean_base: f32) -> f32 {
-    let shelf_edge_h = -0.065_f32.max(ocean_base * 0.35);
+    let shelf_edge_h = (-0.065_f32).max(ocean_base * 0.35);
     if c >= 0.55 {
         let t = smoothstep((c - 0.55) / 0.45);
         t * cont_base
@@ -34,6 +31,17 @@ pub fn update_isostasy_and_erosion(
     config: &TectonicsConfig,
     dt: f32,
 ) {
+    // Калибруем влияние плотностей коры и мантии из конфига (закон Архимеда / Эйри)
+    let rho_m = config.mantle_density.max(3000.0);
+    let cont_buoyancy_ratio =
+        ((rho_m - config.cont_crust_density) / (3300.0 - 2700.0)).clamp(0.4, 2.0);
+    let ocean_sink_ratio =
+        ((config.old_ocean_density - config.young_ocean_density) / (3130.0 - 2890.0))
+            .clamp(0.3, 2.2);
+
+    let eff_cont_base = config.cont_base_height * cont_buoyancy_ratio;
+    let eff_ocean_base = config.ocean_base_height;
+
     {
         let plates = &geology.plates;
         let plate_ids = &geology.plate_ids;
@@ -55,58 +63,56 @@ pub fn update_isostasy_and_erosion(
                 let boundary_elev_delta = shifts[i][0];
                 let c1 = shifts[i][1];
 
-                // Плавное затухание базового смещения плиты у границ, чтобы не было ступеньки на шве
                 let boundary_fade = 1.0 - stress[i].abs().clamp(0.0, 1.0);
                 let eff_plate_offset = plate_offset * boundary_fade * 0.5;
 
                 // 1. Базовая высота из пассивного профиля (Кратон -> Шельф -> Склон -> Океан)
-                let mut h = passive_hypsometric_curve(
-                    c1,
-                    config.cont_base_height,
-                    config.ocean_base_height,
-                ) + eff_plate_offset;
+                let mut h =
+                    passive_hypsometric_curve(c1, eff_cont_base, eff_ocean_base) + eff_plate_offset;
 
                 // 2. Остывание и проседание старой океанической коры (закон Парсонса — Склейтера)
                 if c1 < 0.28 {
                     let ocean_weight = 1.0 - (c1 / 0.28);
-                    let age_norm = (age[i] / config.oceanic_mature_age).clamp(0.0, 1.0);
-                    // Молодая кора у хребтов чуть выше (-0.30), старая абиссаль глубже (-0.42)
-                    let cooling_subsidence = (age_norm.sqrt() - 0.5) * 0.10 * ocean_weight;
+                    let age_norm = (age[i] / config.oceanic_mature_age.max(0.1)).clamp(0.0, 1.0);
+                    let cooling_subsidence =
+                        (age_norm.sqrt() - 0.5) * 0.10 * ocean_sink_ratio * ocean_weight;
                     h -= cooling_subsidence;
                 }
 
-                // 3. Добавляем тектоническую деформацию границ (горы, дуги, желоба, рифты, СОХ)
+                // 3. Тектоническая деформация границ (горы, дуги, желоба, рифты, СОХ)
                 h += boundary_elev_delta;
 
                 *elev_out = h.max(config.elevation_min_clamp);
             });
     }
 
-    // Легкое сглаживание
-    scratch.temp_elevations.copy_from_slice(&geology.elevations);
-    let old_elev = &scratch.temp_elevations;
+    // Пошаговая термическая эрозия (без нижнего зажима 0.01, чтобы ползунок конфига работал с 0.0)
+    let blend = (config.step_erosion_rate * dt * 8.0).clamp(0.0, 0.15);
+    if blend > 1e-5 {
+        scratch.temp_elevations.copy_from_slice(&geology.elevations);
+        let old_elev = &scratch.temp_elevations;
 
-    geology
-        .elevations
-        .par_iter_mut()
-        .enumerate()
-        .for_each(|(i, elev_out)| {
-            let start = cache.edge_offsets[i];
-            let end = cache.edge_offsets[i + 1];
-            if start == end {
-                return;
-            }
+        geology
+            .elevations
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(i, elev_out)| {
+                let start = cache.edge_offsets[i];
+                let end = cache.edge_offsets[i + 1];
+                if start == end {
+                    return;
+                }
 
-            let my_h = old_elev[i];
-            let mut avg_nbr = 0.0_f32;
-            for e in start..end {
-                avg_nbr += old_elev[cache.edge_neighbors[e]];
-            }
-            avg_nbr /= (end - start) as f32;
+                let my_h = old_elev[i];
+                let mut avg_nbr = 0.0_f32;
+                for e in start..end {
+                    avg_nbr += old_elev[cache.edge_neighbors[e]];
+                }
+                avg_nbr /= (end - start) as f32;
 
-            let blend = (config.step_erosion_rate * dt * 1.1).clamp(0.01, 0.10);
-            *elev_out = my_h * (1.0 - blend) + avg_nbr * blend;
-        });
+                *elev_out = my_h * (1.0 - blend) + avg_nbr * blend;
+            });
+    }
 
     let _ = topology;
 }
