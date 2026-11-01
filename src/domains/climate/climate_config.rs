@@ -104,7 +104,7 @@ impl Default for ClimateConfig {
             mountain_wind_barrier: 8.0,
 
             heat_advection_strength: 0.75,
-            equilibrium_iterations: 4,
+            equilibrium_iterations: 3,
 
             axial_tilt: 23.439281_f32.to_radians(),
             active_season: ClimateSeason::Spring,

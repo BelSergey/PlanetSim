@@ -45,8 +45,7 @@ use camera_3d::{
 };
 use hotkeys::hotkey_controls;
 use mesh_globe::{
-    build_globe_mesh, build_river_mesh, recolor_globe_mesh_in_place,
-    reposition_globe_mesh,
+    build_globe_mesh, build_river_mesh, recolor_globe_mesh_in_place, reposition_globe_mesh,
 };
 
 /// Визуальная поверхность планеты.
@@ -509,12 +508,7 @@ fn sync_viewport_mesh(
                 if overlay_needs_recolor {
                     let colors = compute_overlay_colors(&overlay, &geology, &climate, &hydrology);
                     // Обновляем существующий буфер цветов без создания нового Vec и замены атрибута.
-                    recolor_globe_mesh_in_place(
-                        &mut mesh,
-                        &topology,
-                        &geology.elevations,
-                        &colors,
-                    );
+                    recolor_globe_mesh_in_place(&mut mesh, &topology, &geology.elevations, &colors);
                 }
             }
         }

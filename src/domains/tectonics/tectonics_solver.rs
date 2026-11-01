@@ -259,7 +259,8 @@ pub fn simulate_tectonics(
                     warped_dir.z as f64 * v_scale,
                 ];
                 let raw_v_noise = noise.get(v_coords) as f32;
-                let v_noise_mod = config.volcano_noise_base + config.volcano_noise_mult * raw_v_noise;
+                let v_noise_mod =
+                    config.volcano_noise_base + config.volcano_noise_mult * raw_v_noise;
 
                 for (v, &cos_radius) in volcanoes.iter().zip(&volcano_cos_radii) {
                     let dot_prod = warped_dir.dot(v.center).clamp(-1.0, 1.0);
@@ -349,72 +350,77 @@ pub(crate) fn compute_terrain_ruggedness(
     let elevations = &geology.elevations;
     let lithology = &geology.lithology;
     let volcano_mask = &geology.volcano_mask;
-    geology.terrain_ruggedness.par_iter_mut().enumerate().for_each(|(i, ruggedness_out)| {
-        let cell = &topology.cells[i];
-        let elev = elevations[i];
-        let rock = lithology[i];
+    geology
+        .terrain_ruggedness
+        .par_iter_mut()
+        .enumerate()
+        .for_each(|(i, ruggedness_out)| {
+            let cell = &topology.cells[i];
+            let elev = elevations[i];
+            let rock = lithology[i];
 
-        // 1. Масштабонезависимый градиент высот (крутизна макро-склона в пересчете на радиан сферы)
-        let mut max_angular_grad = 0.0_f32;
-        let mut mean_angular_grad = 0.0_f32;
-        let n_count = cell.neighbors.len().max(1) as f32;
+            // 1. Масштабонезависимый градиент высот (крутизна макро-склона в пересчете на радиан сферы)
+            let mut max_angular_grad = 0.0_f32;
+            let mut mean_angular_grad = 0.0_f32;
+            let n_count = cell.neighbors.len().max(1) as f32;
 
-        for &n_id in &cell.neighbors {
-            let step_rad = cell
-                .center
-                .dot(topology.cells[n_id].center)
-                .clamp(-1.0, 1.0)
-                .acos()
-                .max(1e-4);
-            let grad = (elev - elevations[n_id]).abs() / step_rad;
-            if grad > max_angular_grad {
-                max_angular_grad = grad;
+            for &n_id in &cell.neighbors {
+                let step_rad = cell
+                    .center
+                    .dot(topology.cells[n_id].center)
+                    .clamp(-1.0, 1.0)
+                    .acos()
+                    .max(1e-4);
+                let grad = (elev - elevations[n_id]).abs() / step_rad;
+                if grad > max_angular_grad {
+                    max_angular_grad = grad;
+                }
+                mean_angular_grad += grad;
             }
-            mean_angular_grad += grad;
-        }
-        mean_angular_grad /= n_count;
+            mean_angular_grad /= n_count;
 
-        // Нормируем угловой градиент (на горных хребтах grad ~ 4.0..12.0)
-        let slope_score = (max_angular_grad * 0.095 + mean_angular_grad * 0.065).clamp(0.0, 0.78);
-        // 2. Внутриклеточная расчлененность (каньоны, ущелья, скальные гребни) из высокочастотного 3D-шума
-        let d = cell.center.as_dvec3();
-        let crag_a =
-            (noise.get([d.x * 26.0 + 13.4, d.y * 26.0 - 27.8, d.z * 26.0 + 41.2]) as f32).abs();
-        let crag_b =
-            (noise.get([d.x * 52.0 - 31.9, d.y * 52.0 + 18.5, d.z * 52.0 - 22.7]) as f32).abs();
-        let micro_crags = (crag_a * 0.65 + crag_b * 0.35).clamp(0.0, 1.0);
+            // Нормируем угловой градиент (на горных хребтах grad ~ 4.0..12.0)
+            let slope_score =
+                (max_angular_grad * 0.095 + mean_angular_grad * 0.065).clamp(0.0, 0.78);
+            // 2. Внутриклеточная расчлененность (каньоны, ущелья, скальные гребни) из высокочастотного 3D-шума
+            let d = cell.center.as_dvec3();
+            let crag_a =
+                (noise.get([d.x * 26.0 + 13.4, d.y * 26.0 - 27.8, d.z * 26.0 + 41.2]) as f32).abs();
+            let crag_b =
+                (noise.get([d.x * 52.0 - 31.9, d.y * 52.0 + 18.5, d.z * 52.0 - 22.7]) as f32).abs();
+            let micro_crags = (crag_a * 0.65 + crag_b * 0.35).clamp(0.0, 1.0);
 
-        // Твердые породы и карстовые известняки сохраняют острые формы ущелий и скал, а мягкие глины сглаживаются
-        let rock_retention = match rock {
-            RockType::Granite => 1.00,      // Скальные батолиты и пики
-            RockType::Andesite => 0.95,     // Изрезанные стратовулканы и лавовые купола
-            RockType::GneissSchist => 0.88, // Складчатые хребты
-            RockType::FloodBasalt => 0.80,  // Ступенчатые трапповые плато и каньоны (тип Путорана)
-            RockType::Limestone => 0.68,    // Карстовые воронки, каньоны и останцы
-            RockType::Sandstone => 0.50,    // Овраги и столовые возвышенности
-            RockType::OceanicBasalt => 0.45,
-            RockType::ShaleClay | RockType::PelagicSediment => 0.15, // Пологие глинистые равнины
-        };
+            // Твердые породы и карстовые известняки сохраняют острые формы ущелий и скал, а мягкие глины сглаживаются
+            let rock_retention = match rock {
+                RockType::Granite => 1.00,      // Скальные батолиты и пики
+                RockType::Andesite => 0.95,     // Изрезанные стратовулканы и лавовые купола
+                RockType::GneissSchist => 0.88, // Складчатые хребты
+                RockType::FloodBasalt => 0.80, // Ступенчатые трапповые плато и каньоны (тип Путорана)
+                RockType::Limestone => 0.68,   // Карстовые воронки, каньоны и останцы
+                RockType::Sandstone => 0.50,   // Овраги и столовые возвышенности
+                RockType::OceanicBasalt => 0.45,
+                RockType::ShaleClay | RockType::PelagicSediment => 0.15, // Пологие глинистые равнины
+            };
 
-        // В океане учитываем подводные хребты и желоба, на суше — высотную поясность и вулканы
-        let elev_prominence = if elev > 0.0 {
-            ((elev - 0.08).max(0.0) * 1.45).clamp(0.0, 0.45)
-        } else {
-            0.0
-        };
-        let volcano_roughness = if volcano_mask[i] && elev > 0.0 {
-            0.18
-        } else {
-            0.0
-        };
+            // В океане учитываем подводные хребты и желоба, на суше — высотную поясность и вулканы
+            let elev_prominence = if elev > 0.0 {
+                ((elev - 0.08).max(0.0) * 1.45).clamp(0.0, 0.45)
+            } else {
+                0.0
+            };
+            let volcano_roughness = if volcano_mask[i] && elev > 0.0 {
+                0.18
+            } else {
+                0.0
+            };
 
-        let micro_score =
-            micro_crags * rock_retention * (0.14 + slope_score * 0.55 + elev_prominence * 0.60);
+            let micro_score =
+                micro_crags * rock_retention * (0.14 + slope_score * 0.55 + elev_prominence * 0.60);
 
-        *ruggedness_out =
-            (slope_score + elev_prominence * 0.55 + volcano_roughness + micro_score)
-                .clamp(0.0, 1.0);
-    });
+            *ruggedness_out =
+                (slope_score + elev_prominence * 0.55 + volcano_roughness + micro_score)
+                    .clamp(0.0, 1.0);
+        });
 }
 
 /// Определяет базовую породу фундамента по 7 типам границ и удалению вглубь плиты
@@ -564,99 +570,96 @@ fn apply_lithology_overlays(
     let plates = &geology.plates;
     let lithology = &mut geology.lithology;
 
-    lithology.par_iter_mut().enumerate().for_each(|(i, rock_out)| {
-        let r = ridge_cells[i];
-        let elev = elevations[i];
-        let plate_type = plates[plate_ids[i]].plate_type;
-        let lat_abs = topology.cells[i].lat_lon.x.abs();
+    lithology
+        .par_iter_mut()
+        .enumerate()
+        .for_each(|(i, rock_out)| {
+            let r = ridge_cells[i];
+            let elev = elevations[i];
+            let plate_type = plates[plate_ids[i]].plate_type;
+            let lat_abs = topology.cells[i].lat_lon.x.abs();
 
-        // 1. Вулканизм горячих точек (мантийных плюмов) перекрывает коренные породы
-        if volcano_mask[i] {
-            *rock_out = if plate_type == PlateType::Oceanic {
-                RockType::FloodBasalt // Океанические щитовые вулканы (Гавайский тип)
-            } else if elev > config.cont_base_height + 0.14 {
-                RockType::Andesite // Высокие континентальные стратовулканы / кальдеры
-            } else {
-                RockType::FloodBasalt // Континентальные базальтовые плато (траппы)
-            };
-            return;
-        }
-
-        // Вычисляем локальный перепад высот (уклон) по соседям
-        let neighbors = &topology.cells[i].neighbors;
-        let mut max_slope = 0.0_f32;
-        for &n_id in neighbors {
-            let diff = (elev - elevations[n_id]).abs();
-            if diff > max_slope {
-                max_slope = diff;
+            // 1. Вулканизм горячих точек (мантийных плюмов) перекрывает коренные породы
+            if volcano_mask[i] {
+                *rock_out = if plate_type == PlateType::Oceanic {
+                    RockType::FloodBasalt // Океанические щитовые вулканы (Гавайский тип)
+                } else if elev > config.cont_base_height + 0.14 {
+                    RockType::Andesite // Высокие континентальные стратовулканы / кальдеры
+                } else {
+                    RockType::FloodBasalt // Континентальные базальтовые плато (траппы)
+                };
+                return;
             }
-        }
 
-        let dir = topology.cells[i].center.as_dvec3();
-        let litho_noise =
-            noise.get([dir.x * 6.5 + 31.7, dir.y * 6.5 - 19.3, dir.z * 6.5 + 47.1]) as f32;
-
-        // 2. Морское дно (Ниже уровня океана)
-        if elev <= 0.0 {
-            // Тёплые мелководные шельфы (тропики и субтропики до ~35° широты) -> Известняки (рифовые/карбонатные банки)
-            if elev > -0.09 + litho_noise * 0.015
-                && lat_abs < 0.62 + litho_noise * 0.06
-                && !r
-                && *rock_out != RockType::Andesite
-            {
-                *rock_out = RockType::Limestone;
+            // Вычисляем локальный перепад высот (уклон) по соседям
+            let neighbors = &topology.cells[i].neighbors;
+            let mut max_slope = 0.0_f32;
+            for &n_id in neighbors {
+                let diff = (elev - elevations[n_id]).abs();
+                if diff > max_slope {
+                    max_slope = diff;
+                }
             }
-            // Глубокие старые абиссальные равнины вдали от СОХ -> Пелагические осадки
-            else if elev < config.ocean_base_height - 0.05 + litho_noise * 0.02
-                && !r
-                && *rock_out == RockType::OceanicBasalt
-            {
-                *rock_out = RockType::PelagicSediment;
-            }
-            return;
-        }
 
-        // 3. Суша (Выше уровня океана)
-        // Если участок бывшего морского дна поднялся выше уровня моря, превращаем илы/MORB в осадочные породы суши
-        if *rock_out == RockType::PelagicSediment
-            || *rock_out == RockType::OceanicBasalt
-        {
-            *rock_out =
-                if lat_abs < 0.60 + litho_noise * 0.06 && elev < config.cont_base_height * 0.8 {
+            let dir = topology.cells[i].center.as_dvec3();
+            let litho_noise =
+                noise.get([dir.x * 6.5 + 31.7, dir.y * 6.5 - 19.3, dir.z * 6.5 + 47.1]) as f32;
+
+            // 2. Морское дно (Ниже уровня океана)
+            if elev <= 0.0 {
+                // Тёплые мелководные шельфы (тропики и субтропики до ~35° широты) -> Известняки (рифовые/карбонатные банки)
+                if elev > -0.09 + litho_noise * 0.015
+                    && lat_abs < 0.62 + litho_noise * 0.06
+                    && !r
+                    && *rock_out != RockType::Andesite
+                {
+                    *rock_out = RockType::Limestone;
+                }
+                // Глубокие старые абиссальные равнины вдали от СОХ -> Пелагические осадки
+                else if elev < config.ocean_base_height - 0.05 + litho_noise * 0.02
+                    && !r
+                    && *rock_out == RockType::OceanicBasalt
+                {
+                    *rock_out = RockType::PelagicSediment;
+                }
+                return;
+            }
+
+            // 3. Суша (Выше уровня океана)
+            // Если участок бывшего морского дна поднялся выше уровня моря, превращаем илы/MORB в осадочные породы суши
+            if *rock_out == RockType::PelagicSediment || *rock_out == RockType::OceanicBasalt {
+                *rock_out = if lat_abs < 0.60 + litho_noise * 0.06
+                    && elev < config.cont_base_height * 0.8
+                {
                     RockType::Limestone
                 } else {
                     RockType::ShaleClay
                 };
-        }
-
-        // Карбонатные платформы на тёплых прибрежных равнинах с малым уклоном
-        if elev < config.cont_base_height * 0.78
-            && max_slope < 0.018
-            && lat_abs < 0.58 + litho_noise * 0.05
-            && matches!(
-                *rock_out,
-                RockType::Sandstone | RockType::ShaleClay
-            )
-            && litho_noise > 0.12
-        {
-            *rock_out = RockType::Limestone;
-            return;
-        }
-
-        // Осадконакопление в плоских низинах и межгорных котловинах
-        if elev < config.cont_base_height * (0.90 + litho_noise * 0.08) && max_slope < 0.014 {
-            if max_slope < 0.006 && elev < config.cont_base_height * (0.55 + litho_noise * 0.08) {
-                // Плоские низменности — глинистые отложения
-                *rock_out = RockType::ShaleClay;
-            } else if matches!(
-                *rock_out,
-                RockType::Granite | RockType::GneissSchist
-            ) {
-                // Пологие равнины поверх древнего фундамента перекрываются песчаным осадочным чехлом
-                *rock_out = RockType::Sandstone;
             }
-        }
-    });
+
+            // Карбонатные платформы на тёплых прибрежных равнинах с малым уклоном
+            if elev < config.cont_base_height * 0.78
+                && max_slope < 0.018
+                && lat_abs < 0.58 + litho_noise * 0.05
+                && matches!(*rock_out, RockType::Sandstone | RockType::ShaleClay)
+                && litho_noise > 0.12
+            {
+                *rock_out = RockType::Limestone;
+                return;
+            }
+
+            // Осадконакопление в плоских низинах и межгорных котловинах
+            if elev < config.cont_base_height * (0.90 + litho_noise * 0.08) && max_slope < 0.014 {
+                if max_slope < 0.006 && elev < config.cont_base_height * (0.55 + litho_noise * 0.08)
+                {
+                    // Плоские низменности — глинистые отложения
+                    *rock_out = RockType::ShaleClay;
+                } else if matches!(*rock_out, RockType::Granite | RockType::GneissSchist) {
+                    // Пологие равнины поверх древнего фундамента перекрываются песчаным осадочным чехлом
+                    *rock_out = RockType::Sandstone;
+                }
+            }
+        });
 }
 
 /// Находит ровно 3 ближайшие плиты к данной точке.
@@ -823,28 +826,32 @@ pub fn step_elevation_diffusion(
 ) {
     let old_elevations = elevations.to_vec();
 
-    elevations.par_iter_mut().enumerate().for_each(|(i, elevation_out)| {
-        let cell = &topology.cells[i];
-        if cell.neighbors.is_empty() {
-            return;
-        }
-        // Сумму высот и максимальный уклон можно получить за один обход соседей.
-        let mut neighbor_sum = 0.0_f32;
-        let mut max_slope = 0.0_f32;
-        let current_elevation = old_elevations[i];
+    elevations
+        .par_iter_mut()
+        .enumerate()
+        .for_each(|(i, elevation_out)| {
+            let cell = &topology.cells[i];
+            if cell.neighbors.is_empty() {
+                return;
+            }
+            // Сумму высот и максимальный уклон можно получить за один обход соседей.
+            let mut neighbor_sum = 0.0_f32;
+            let mut max_slope = 0.0_f32;
+            let current_elevation = old_elevations[i];
 
-        for &n_id in &cell.neighbors {
-            let neighbor_elevation = old_elevations[n_id];
-            neighbor_sum += neighbor_elevation;
-            max_slope = max_slope.max((current_elevation - neighbor_elevation).abs());
-        }
+            for &n_id in &cell.neighbors {
+                let neighbor_elevation = old_elevations[n_id];
+                neighbor_sum += neighbor_elevation;
+                max_slope = max_slope.max((current_elevation - neighbor_elevation).abs());
+            }
 
-        let avg_neighbor = neighbor_sum / cell.neighbors.len() as f32;
+            let avg_neighbor = neighbor_sum / cell.neighbors.len() as f32;
 
-        let local_strength = (strength + max_slope * slope_erosion_factor).min(max_strength);
+            let local_strength = (strength + max_slope * slope_erosion_factor).min(max_strength);
 
-        *elevation_out = old_elevations[i] * (1.0 - local_strength) + avg_neighbor * local_strength;
-    });
+            *elevation_out =
+                old_elevations[i] * (1.0 - local_strength) + avg_neighbor * local_strength;
+        });
 }
 
 fn apply_oceanic_crust_cooling(
@@ -875,12 +882,15 @@ fn apply_oceanic_crust_cooling(
     }
 
     let max_dist = config.oceanic_age_max_distance.max(1.0);
-    elevations.par_iter_mut().enumerate().for_each(|(i, elevation)| {
-        if *elevation <= 0.0 && dist_from_ridge[i] != u32::MAX {
-            let age_factor = smoothstep((dist_from_ridge[i] as f32) / max_dist);
-            *elevation -= age_factor * config.oceanic_age_depth_gain;
-        }
-    });
+    elevations
+        .par_iter_mut()
+        .enumerate()
+        .for_each(|(i, elevation)| {
+            if *elevation <= 0.0 && dist_from_ridge[i] != u32::MAX {
+                let age_factor = smoothstep((dist_from_ridge[i] as f32) / max_dist);
+                *elevation -= age_factor * config.oceanic_age_depth_gain;
+            }
+        });
 }
 
 /// Создает цепочки вулканов, вращая статичные мантийные плюмы (горячие точки) по дуге

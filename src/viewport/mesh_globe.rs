@@ -29,10 +29,7 @@ fn globe_mesh_sizes(topology: &WorldTopology, elevations: &[f32]) -> (usize, usi
                 .iter()
                 .filter(|&&neighbor_id| elevations[cell_id] > elevations[neighbor_id])
                 .count();
-            (
-                1 + corners + walls * 4,
-                corners * 3 + walls * 6,
-            )
+            (1 + corners + walls * 4, corners * 3 + walls * 6)
         })
         .reduce(
             || (0usize, 0usize),
@@ -70,7 +67,11 @@ pub fn build_globe_mesh(
             for (local_cell_id, cell) in cells.iter().enumerate() {
                 let cell_id = first_cell + local_cell_id;
                 let real_h = elevations[cell_id];
-                let render_h = if flatten_water { real_h.max(0.0) } else { real_h };
+                let render_h = if flatten_water {
+                    real_h.max(0.0)
+                } else {
+                    real_h
+                };
                 let r = radius + render_h * height_scale;
                 let top_color = cell_colors[cell_id];
                 let top_normal = cell.center.to_array();
@@ -242,7 +243,11 @@ pub fn reposition_globe_mesh(
             for (local_cell_id, cell) in cells.iter().enumerate() {
                 let cell_id = first_cell + local_cell_id;
                 let real_h = real_elevations[cell_id];
-                let render_h = if flatten_water { real_h.max(0.0) } else { real_h };
+                let render_h = if flatten_water {
+                    real_h.max(0.0)
+                } else {
+                    real_h
+                };
                 let r = radius + render_h * height_scale;
                 chunk_positions.push((cell.center * r).to_array());
 

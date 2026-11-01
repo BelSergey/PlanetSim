@@ -27,17 +27,25 @@ pub(super) fn compute_season_pressure_and_winds(
     let avg_hex_rad = precalc.avg_hex_rad;
 
     // 1. Термическое поле (считается заново каждую итерацию)
-    scratch.thermal_field.par_iter_mut().enumerate().for_each(|(i, out)| {
-        let c = continentality[i];
-        let sea_level_temp = snap.temperatures[i] + precalc.mountain_cooling[i];
-        let ocean_ref_temp = precalc.ocean_ref_temp[i];
-        let temp_diff = (sea_level_temp - ocean_ref_temp) / 12.0;
-        let weight = if c >= 0.0 { 0.4 + 0.6 * c } else { 0.4 * (1.0 + c * 0.6) };
-        *out = (-temp_diff * weight).clamp(-1.2, 1.2);
-    });
+    scratch
+        .thermal_field
+        .par_iter_mut()
+        .enumerate()
+        .for_each(|(i, out)| {
+            let c = continentality[i];
+            let sea_level_temp = snap.temperatures[i] + precalc.mountain_cooling[i];
+            let ocean_ref_temp = precalc.ocean_ref_temp[i];
+            let temp_diff = (sea_level_temp - ocean_ref_temp) / 12.0;
+            let weight = if c >= 0.0 {
+                0.4 + 0.6 * c
+            } else {
+                0.4 * (1.0 + c * 0.6)
+            };
+            *out = (-temp_diff * weight).clamp(-1.2, 1.2);
+        });
 
     // Сглаживание термического поля (параллельно)
-    for _ in 0..10 {
+    for _ in 0..5 {
         std::mem::swap(&mut scratch.thermal_field, &mut scratch.prev_thermal);
         let prev = &scratch.prev_thermal;
         let out = &mut scratch.thermal_field;
@@ -56,13 +64,16 @@ pub(super) fn compute_season_pressure_and_winds(
     }
 
     // 2. Давление = Широтные пояса (из scratch, посчитаны 1 раз на сезон) + Термика
-    snap.pressure.par_iter_mut().enumerate().for_each(|(i, pressure)| {
-        *pressure = scratch.latitudinal_pressure[i]
-            + scratch.thermal_field[i] * config.thermal_pressure_weight;
-    });
+    snap.pressure
+        .par_iter_mut()
+        .enumerate()
+        .for_each(|(i, pressure)| {
+            *pressure = scratch.latitudinal_pressure[i]
+                + scratch.thermal_field[i] * config.thermal_pressure_weight;
+        });
 
     // Сглаживание давления (параллельно)
-    for _ in 0..8 {
+    for _ in 0..4 {
         std::mem::swap(&mut snap.pressure, &mut scratch.prev_pressure);
         let prev = &scratch.prev_pressure;
         let out = &mut snap.pressure;
@@ -85,97 +96,98 @@ pub(super) fn compute_season_pressure_and_winds(
     let tdirs = &precalc.tangent_dirs_flat;
 
     let pressure = &snap.pressure;
-    snap.winds_3d.par_iter_mut()
+    snap.winds_3d
+        .par_iter_mut()
         .zip(snap.winds.par_iter_mut())
         .enumerate()
         .for_each(|(i, (wind_out, wind_2d_out))| {
-        let cell = &topology.cells[i];
-        let pos = cell.center;
-        let my_elev = (geology.elevations[i] - config.mountain_base_level).max(0.0);
-        let east = precalc.east[i];
-        let north = precalc.north[i];
+            let cell = &topology.cells[i];
+            let pos = cell.center;
+            let my_elev = (geology.elevations[i] - config.mountain_base_level).max(0.0);
+            let east = precalc.east[i];
+            let north = precalc.north[i];
 
-        let my_p = pressure[i];
-        let mut grad_3d = Vec3::ZERO;
+            let my_p = pressure[i];
+            let mut grad_3d = Vec3::ZERO;
 
-        let start = offs[i];
-        let end = offs[i + 1];
-        for (j, tdir) in tdirs.iter().enumerate().take(end).skip(start) {
-            let k = j - start;
-            let n_id = cell.neighbors[k];
-            let n_pos = topology.cells[n_id].center;
-            let raw_dir = n_pos - pos;
-            let safe_dist = raw_dir.length().max(avg_hex_rad * 0.3);
-            let diff = (my_p - pressure[n_id]) / safe_dist;
-            grad_3d += tdir * diff;
-        }
+            let start = offs[i];
+            let end = offs[i + 1];
+            for (j, tdir) in tdirs.iter().enumerate().take(end).skip(start) {
+                let k = j - start;
+                let n_id = cell.neighbors[k];
+                let n_pos = topology.cells[n_id].center;
+                let raw_dir = n_pos - pos;
+                let safe_dist = raw_dir.length().max(avg_hex_rad * 0.3);
+                let diff = (my_p - pressure[n_id]) / safe_dist;
+                grad_3d += tdir * diff;
+            }
 
-        if !cell.neighbors.is_empty() {
-            grad_3d = (grad_3d / cell.neighbors.len() as f32) * 0.22;
-        }
+            if !cell.neighbors.is_empty() {
+                grad_3d = (grad_3d / cell.neighbors.len() as f32) * 0.22;
+            }
 
-        // Кориолис (Rodrigues, cos/sin предвычислены)
-        let mut wind_3d = rodrigues(
-            pos,
-            grad_3d,
-            precalc.coriolis_cos[i],
-            precalc.coriolis_sin[i],
-        );
+            // Кориолис (Rodrigues, cos/sin предвычислены)
+            let mut wind_3d = rodrigues(
+                pos,
+                grad_3d,
+                precalc.coriolis_cos[i],
+                precalc.coriolis_sin[i],
+            );
 
-        // Синоптические волны в струях ветра (сильнее в циклонах my_p < 0 и умеренных широтах)
-        let cyclone_instability = (0.45 - my_p * 0.55).clamp(0.15, 1.25);
-        let seasonal_wave = precalc.synoptic_noise_a[i] * (1.0 - 0.35 * season_mult.abs())
-            + precalc.synoptic_noise_b[i] * (0.60 * season_mult);
-        let wave_angle = seasonal_wave * 0.32 * cyclone_instability;
-        let (w_sin, w_cos) = wave_angle.sin_cos();
-        wind_3d = rodrigues(pos, wind_3d, w_cos, w_sin);
+            // Синоптические волны в струях ветра (сильнее в циклонах my_p < 0 и умеренных широтах)
+            let cyclone_instability = (0.45 - my_p * 0.55).clamp(0.15, 1.25);
+            let seasonal_wave = precalc.synoptic_noise_a[i] * (1.0 - 0.35 * season_mult.abs())
+                + precalc.synoptic_noise_b[i] * (0.60 * season_mult);
+            let wave_angle = seasonal_wave * 0.32 * cyclone_instability;
+            let (w_sin, w_cos) = wave_angle.sin_cos();
+            wind_3d = rodrigues(pos, wind_3d, w_cos, w_sin);
 
-        // Орографический барьер
-        let mut mountain_drag = 0.0;
-        let mut upslope_grad = Vec3::ZERO;
-        let wind_dir = wind_3d.normalize_or_zero();
+            // Орографический барьер
+            let mut mountain_drag = 0.0;
+            let mut upslope_grad = Vec3::ZERO;
+            let wind_dir = wind_3d.normalize_or_zero();
 
-        for (j, tdir) in tdirs.iter().enumerate().take(end).skip(start) {
-            let k = j - start;
-            let n_id = cell.neighbors[k];
-            let to_neighbor = tdir;
-            let n_elev = (geology.elevations[n_id] - config.mountain_base_level).max(0.0);
-            let elev_diff = n_elev - my_elev;
+            for (j, tdir) in tdirs.iter().enumerate().take(end).skip(start) {
+                let k = j - start;
+                let n_id = cell.neighbors[k];
+                let to_neighbor = tdir;
+                let n_elev = (geology.elevations[n_id] - config.mountain_base_level).max(0.0);
+                let elev_diff = n_elev - my_elev;
 
-            if elev_diff > 0.0 {
-                // 1. Вертикальный масштаб: конвертируем абстрактные единицы высоты в физические
-                // Если пик 0.5 — это ~8 км, то коэффициент ~0.016.
-                // (Подберите 0.01 - 0.03, чтобы горы выглядели физически реально в ветрах)
-                let vertical_scale = 0.02;
+                if elev_diff > 0.0 {
+                    // 1. Вертикальный масштаб: конвертируем абстрактные единицы высоты в физические
+                    // Если пик 0.5 — это ~8 км, то коэффициент ~0.016.
+                    // (Подберите 0.01 - 0.03, чтобы горы выглядели физически реально в ветрах)
+                    let vertical_scale = 0.02;
 
-                // 2. Физический склон: высота / горизонтальная дистанция в тех же единицах (радианах)
-                let real_height_diff = elev_diff * vertical_scale;
-                let slope = (real_height_diff / avg_hex_rad).clamp(0.0, 2.0);
+                    // 2. Физический склон: высота / горизонтальная дистанция в тех же единицах (радианах)
+                    let real_height_diff = elev_diff * vertical_scale;
+                    let slope = (real_height_diff / avg_hex_rad).clamp(0.0, 2.0);
 
-                upslope_grad += to_neighbor * slope;
+                    upslope_grad += to_neighbor * slope;
 
-                let alignment = wind_dir.dot(*to_neighbor);
-                if alignment > 0.0 {
-                    mountain_drag += slope * alignment;
+                    let alignment = wind_dir.dot(*to_neighbor);
+                    if alignment > 0.0 {
+                        mountain_drag += slope * alignment;
+                    }
                 }
             }
-        }
 
-        if upslope_grad.length_squared() > 1e-6 {
-            let slope_normal = upslope_grad.normalize();
-            let into_wall = wind_3d.dot(slope_normal).max(0.0);
-            let deflect_strength = (upslope_grad.length() * 0.35).clamp(0.0, 0.75);
-            wind_3d -= slope_normal * (into_wall * deflect_strength);
-        }
+            if upslope_grad.length_squared() > 1e-6 {
+                let slope_normal = upslope_grad.normalize();
+                let into_wall = wind_3d.dot(slope_normal).max(0.0);
+                let deflect_strength = (upslope_grad.length() * 0.35).clamp(0.0, 0.75);
+                wind_3d -= slope_normal * (into_wall * deflect_strength);
+            }
 
-        let plateau_roughness = my_elev * 2.5;
-        let total_drag = mountain_drag + plateau_roughness;
-        let barrier_factor = 1.0 / (1.0 + total_drag * config.mountain_wind_barrier * 0.15);
-        wind_3d = wind_3d * barrier_factor * config.wind_speed_multiplier;
+            let plateau_roughness = my_elev * 2.5;
+            let total_drag = mountain_drag + plateau_roughness;
+            let barrier_factor = 1.0 / (1.0 + total_drag * config.mountain_wind_barrier * 0.15);
+            wind_3d = wind_3d * barrier_factor * config.wind_speed_multiplier;
 
-        *wind_out = wind_3d;
-        *wind_2d_out = Vec2::new(wind_3d.dot(east), wind_3d.dot(north));
-    });
+            *wind_out = wind_3d;
+            *wind_2d_out = Vec2::new(wind_3d.dot(east), wind_3d.dot(north));
+        });
 }
 
 pub(super) fn compute_ocean_currents(
@@ -194,90 +206,93 @@ pub(super) fn compute_ocean_currents(
     let pressure = &snap.pressure;
     let temperatures = &snap.temperatures;
     let winds_3d = &snap.winds_3d;
-    snap.ocean_currents.par_iter_mut().enumerate().for_each(|(i, current_out)| {
-        if geology.elevations[i] > 0.0 {
-            *current_out = Vec3::ZERO;
-            return;
-        }
-
-        let cell = &topology.cells[i];
-        let pos = cell.center;
-
-        // 1. Ветровое течение
-        let mut wind_current = winds_3d[i] * config.ocean_current_speed_multiplier;
-        if temperatures[i] <= 0.0 {
-            wind_current *= 0.1;
-        }
-
-        // 2. Спираль Экмана (Rodrigues)
-        wind_current = rodrigues(
-            pos,
-            wind_current,
-            precalc.ekman_cos[i],
-            precalc.ekman_sin[i],
-        );
-
-        // 3. Геострофическое течение (угол ±π/2 → cos=0, sin=±1, только cross)
-        let my_p = pressure[i];
-        let mut grad_p = Vec3::ZERO;
-        let start = offs[i];
-        let end = offs[i + 1];
-        for (j, tdir) in tdirs.iter().enumerate().take(end).skip(start) {
-            let k = j - start;
-            let n_id = cell.neighbors[k];
-            if geology.elevations[n_id] <= 0.0 {
-                let n_pos = topology.cells[n_id].center;
-                let raw_dir = n_pos - pos;
-                let safe_dist = raw_dir.length().max(avg_hex_rad * 0.3);
-                let diff = (my_p - pressure[n_id]) / safe_dist;
-                grad_p += tdir * diff;
+    snap.ocean_currents
+        .par_iter_mut()
+        .enumerate()
+        .for_each(|(i, current_out)| {
+            if geology.elevations[i] > 0.0 {
+                *current_out = Vec3::ZERO;
+                return;
             }
-        }
-        if !cell.neighbors.is_empty() {
-            grad_p = (grad_p / cell.neighbors.len() as f32) * 0.5;
-        }
 
-        let s = precalc.sin_lat[i];
-        let sign = s / (s.abs() + 0.03);
-        let geostrophic_current = grad_p.cross(pos) * sign * config.geostrophic_multiplier;
+            let cell = &topology.cells[i];
+            let pos = cell.center;
 
-        let mut current_3d = wind_current * 0.4 + geostrophic_current * 0.6;
-
-        // 4. Граничные течения
-        let mut coast_normal = Vec3::ZERO;
-        for j in start..end {
-            let k = j - start;
-            let n_id = cell.neighbors[k];
-            if geology.elevations[n_id] > 0.0 {
-                let raw_dir = pos - topology.cells[n_id].center;
-                let tangent_from_coast = (raw_dir - pos * raw_dir.dot(pos)).normalize_or_zero();
-                coast_normal += tangent_from_coast;
+            // 1. Ветровое течение
+            let mut wind_current = winds_3d[i] * config.ocean_current_speed_multiplier;
+            if temperatures[i] <= 0.0 {
+                wind_current *= 0.1;
             }
-        }
 
-        let orig_speed = current_3d.length();
-        if coast_normal.length_squared() > 1e-6 && orig_speed > 1e-5 {
-            coast_normal = coast_normal.normalize();
-            let into_coast = current_3d.dot(-coast_normal);
-            if into_coast > 0.0 {
-                let mut along_coast = current_3d + coast_normal * into_coast;
-                if along_coast.length_squared() > 1e-8 {
-                    along_coast = along_coast.normalize() * orig_speed;
+            // 2. Спираль Экмана (Rodrigues)
+            wind_current = rodrigues(
+                pos,
+                wind_current,
+                precalc.ekman_cos[i],
+                precalc.ekman_sin[i],
+            );
+
+            // 3. Геострофическое течение (угол ±π/2 → cos=0, sin=±1, только cross)
+            let my_p = pressure[i];
+            let mut grad_p = Vec3::ZERO;
+            let start = offs[i];
+            let end = offs[i + 1];
+            for (j, tdir) in tdirs.iter().enumerate().take(end).skip(start) {
+                let k = j - start;
+                let n_id = cell.neighbors[k];
+                if geology.elevations[n_id] <= 0.0 {
+                    let n_pos = topology.cells[n_id].center;
+                    let raw_dir = n_pos - pos;
+                    let safe_dist = raw_dir.length().max(avg_hex_rad * 0.3);
+                    let diff = (my_p - pressure[n_id]) / safe_dist;
+                    grad_p += tdir * diff;
                 }
-                let east = precalc.east[i];
-                let western_alignment = (-coast_normal).dot(east);
-                let boost = config.boundary_current_multiplier
-                    * (1.0 + 1.5 * smoothstep((western_alignment + 0.5) / 1.0));
-                current_3d = along_coast * boost;
             }
-        } else {
-            let coastal_proximity = (1.0 - continentality[i].abs() * 3.0).clamp(0.0, 1.0);
-            current_3d *=
-                1.0 + (config.boundary_current_multiplier - 1.0) * 0.35 * coastal_proximity;
-        }
+            if !cell.neighbors.is_empty() {
+                grad_p = (grad_p / cell.neighbors.len() as f32) * 0.5;
+            }
 
-        *current_out = current_3d;
-    });
+            let s = precalc.sin_lat[i];
+            let sign = s / (s.abs() + 0.03);
+            let geostrophic_current = grad_p.cross(pos) * sign * config.geostrophic_multiplier;
+
+            let mut current_3d = wind_current * 0.4 + geostrophic_current * 0.6;
+
+            // 4. Граничные течения
+            let mut coast_normal = Vec3::ZERO;
+            for j in start..end {
+                let k = j - start;
+                let n_id = cell.neighbors[k];
+                if geology.elevations[n_id] > 0.0 {
+                    let raw_dir = pos - topology.cells[n_id].center;
+                    let tangent_from_coast = (raw_dir - pos * raw_dir.dot(pos)).normalize_or_zero();
+                    coast_normal += tangent_from_coast;
+                }
+            }
+
+            let orig_speed = current_3d.length();
+            if coast_normal.length_squared() > 1e-6 && orig_speed > 1e-5 {
+                coast_normal = coast_normal.normalize();
+                let into_coast = current_3d.dot(-coast_normal);
+                if into_coast > 0.0 {
+                    let mut along_coast = current_3d + coast_normal * into_coast;
+                    if along_coast.length_squared() > 1e-8 {
+                        along_coast = along_coast.normalize() * orig_speed;
+                    }
+                    let east = precalc.east[i];
+                    let western_alignment = (-coast_normal).dot(east);
+                    let boost = config.boundary_current_multiplier
+                        * (1.0 + 1.5 * smoothstep((western_alignment + 0.5) / 1.0));
+                    current_3d = along_coast * boost;
+                }
+            } else {
+                let coastal_proximity = (1.0 - continentality[i].abs() * 3.0).clamp(0.0, 1.0);
+                current_3d *=
+                    1.0 + (config.boundary_current_multiplier - 1.0) * 0.35 * coastal_proximity;
+            }
+
+            *current_out = current_3d;
+        });
 
     // 5. Лёгкое сглаживание течений (параллельно)
     for _ in 0..2 {

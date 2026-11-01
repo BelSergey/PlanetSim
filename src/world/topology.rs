@@ -162,59 +162,59 @@ impl WorldTopology {
         (0..num_cells)
             .into_par_iter()
             .map(|i| {
-            let center = vertices[i];
-            let lat = center.y.clamp(-1.0, 1.0).asin();
-            let lon = center.z.atan2(center.x);
+                let center = vertices[i];
+                let lat = center.y.clamp(-1.0, 1.0).asin();
+                let lon = center.z.atan2(center.x);
 
-            let up = if center.y.abs() < 0.99 {
-                Vec3::Y
-            } else {
-                Vec3::X
-            };
-            let tangent = center.cross(up).normalize();
-            let bitangent = center.cross(tangent);
+                let up = if center.y.abs() < 0.99 {
+                    Vec3::Y
+                } else {
+                    Vec3::X
+                };
+                let tangent = center.cross(up).normalize();
+                let bitangent = center.cross(tangent);
 
-            let angle_around_center = |dir: Vec3| -> f32 {
-                let d = dir - center;
-                d.dot(bitangent).atan2(d.dot(tangent))
-            };
+                let angle_around_center = |dir: Vec3| -> f32 {
+                    let d = dir - center;
+                    d.dot(bitangent).atan2(d.dot(tangent))
+                };
 
-            // Угол каждого угла ячейки вычисляем один раз: sort comparator вызывается многократно.
-            let mut corners_with_angles: Vec<(f32, Vec3)> = incident_faces[i]
-                .iter()
-                .map(|&f_idx| {
-                    let corner = face_centers[f_idx];
-                    (angle_around_center(corner), corner)
-                })
-                .collect();
-            corners_with_angles.sort_by(|a, b| a.0.total_cmp(&b.0));
-            let corners: Vec<Vec3> = corners_with_angles
-                .into_iter()
-                .map(|(_, corner)| corner)
-                .collect();
-
-            let n = corners.len();
-            let mut ordered_neighbors = Vec::with_capacity(n);
-            for k in 0..n {
-                let edge_mid = (corners[k] + corners[(k + 1) % n]).normalize();
-                let best_neighbor = *raw_neighbors[i]
+                // Угол каждого угла ячейки вычисляем один раз: sort comparator вызывается многократно.
+                let mut corners_with_angles: Vec<(f32, Vec3)> = incident_faces[i]
                     .iter()
-                    .max_by(|&&n_a, &&n_b| {
-                        vertices[n_a]
-                            .dot(edge_mid)
-                            .total_cmp(&vertices[n_b].dot(edge_mid))
+                    .map(|&f_idx| {
+                        let corner = face_centers[f_idx];
+                        (angle_around_center(corner), corner)
                     })
-                    .unwrap();
-                ordered_neighbors.push(best_neighbor);
-            }
+                    .collect();
+                corners_with_angles.sort_by(|a, b| a.0.total_cmp(&b.0));
+                let corners: Vec<Vec3> = corners_with_angles
+                    .into_iter()
+                    .map(|(_, corner)| corner)
+                    .collect();
 
-            TopologicalCell {
-                center,
-                lat_lon: Vec2::new(lat, lon),
-                neighbors: ordered_neighbors,
-                corners,
-            }
-        })
+                let n = corners.len();
+                let mut ordered_neighbors = Vec::with_capacity(n);
+                for k in 0..n {
+                    let edge_mid = (corners[k] + corners[(k + 1) % n]).normalize();
+                    let best_neighbor = *raw_neighbors[i]
+                        .iter()
+                        .max_by(|&&n_a, &&n_b| {
+                            vertices[n_a]
+                                .dot(edge_mid)
+                                .total_cmp(&vertices[n_b].dot(edge_mid))
+                        })
+                        .unwrap();
+                    ordered_neighbors.push(best_neighbor);
+                }
+
+                TopologicalCell {
+                    center,
+                    lat_lon: Vec2::new(lat, lon),
+                    neighbors: ordered_neighbors,
+                    corners,
+                }
+            })
             .collect()
     }
 }

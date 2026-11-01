@@ -28,6 +28,21 @@ pub(super) fn compute_season_precipitation(
     let tdirs = &precalc.tangent_dirs_flat;
     let hex_rad = precalc.avg_hex_rad;
 
+    let mut upwind_nbrs: Vec<u32> = Vec::with_capacity(neighbor_ids.len());
+    let mut upwind_w: Vec<f32> = Vec::with_capacity(neighbor_ids.len());
+    let mut upwind_offs: Vec<u32> = Vec::with_capacity(num_cells + 1);
+    upwind_offs.push(0);
+    for i in 0..num_cells {
+        for j in offs[i]..offs[i + 1] {
+            let w = w_air[j];
+            if w > 0.0 {
+                upwind_nbrs.push(neighbor_ids[j]);
+                upwind_w.push(w);
+            }
+        }
+        upwind_offs.push(upwind_nbrs.len() as u32);
+    }
+
     let sum_wind: f32 = wind_speed.par_iter().copied().sum();
     let avg_wind = (sum_wind / num_cells.max(1) as f32).max(1e-4);
     let ref_wind = avg_wind * 1.15;
@@ -139,7 +154,7 @@ pub(super) fn compute_season_precipitation(
     let mean_courant = 0.58_f32;
     let cloud_travel_rad = (0.85 * config.moisture_advection_strength).clamp(0.20, 2.00);
     let cloud_steps =
-        ((cloud_travel_rad / (hex_rad * mean_courant)).round() as usize).clamp(30, 220);
+        ((cloud_travel_rad / (hex_rad * mean_courant)).round() as usize).clamp(30, 120);
     let inv_cloud_steps = 1.0 / cloud_steps as f32;
 
     let smooth_iters = ((0.07 / hex_rad).round() as usize).clamp(4, 18);
@@ -160,14 +175,9 @@ pub(super) fn compute_season_precipitation(
             let w_sum = upwind_weight_sum[i];
 
             let incoming_c = if sp > 1e-5 && w_sum > 0.0 {
-                let start = offs[i];
-                let end = offs[i + 1];
-                let mut upwind_c = 0.0;
-                for j in start..end {
-                    let w = w_air[j];
-                    if w > 0.0 {
-                        upwind_c += prev_c[neighbor_ids[j] as usize] * w;
-                    }
+                let mut upwind_c = 0.0_f32;
+                for k in upwind_offs[i] as usize..upwind_offs[i + 1] as usize {
+                    upwind_c += prev_c[upwind_nbrs[k] as usize] * upwind_w[k];
                 }
                 upwind_c / w_sum
             } else {
@@ -204,7 +214,8 @@ pub(super) fn compute_season_precipitation(
     }
 
     // 4. Финальная нормализация карты осадков [0.0 .. 1.0]
-    snap.precipitation.par_iter_mut()
+    snap.precipitation
+        .par_iter_mut()
         .zip(snap.humidity.par_iter_mut())
         .enumerate()
         .for_each(|(i, (precip_out, humidity_out))| {

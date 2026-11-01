@@ -13,7 +13,6 @@ use ui::UiPlugin;
 use viewport::ViewportPlugin;
 use world::WorldPlugin;
 
-
 fn main() {
     let total_threads = std::thread::available_parallelism()
         .map(|n| n.get())
