@@ -3,11 +3,13 @@
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::domains::tectonics::tectonics_data::GeologyLayer;
+
 #[repr(u8)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub enum SoilType {
     #[default]
-    Ocean, // Морское дно
+    Ocean,     // Морское дно
     Leptosol,  // Горные скелетные почвы и скальные выходы на крутых склонах
     Gelisol,   // Мерзлотные тундровые почвы (вечная мерзлота, водоупор)
     Podzol,    // Кислотные подзолистые почвы холодных лесов (на песках и гранитах)
@@ -16,16 +18,21 @@ pub enum SoilType {
     Aridisol,  // Сухие пустынные и полупустынные песчано-солончаковые почвы
     Laterite,  // Красно-желтые ферраллитные почвы жарких влажных тропиков
     Andisol,   // Темные высокоплодородные вулканические почвы
-    Gleysol,   // Переувлажненные глинисто-болотные и пойменные почвы низин
+    Gleysol,   // Переувлажненные глинисто-болотные, пойменные и озерные почвы низин
 }
 
 #[repr(u8)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub enum Biome {
     #[default]
-    DeepOcean, // Глубокий океан
+    DeepOcean,    // Глубокий океан
     ShallowOcean, // Шельфовое мелководье и рифы
     SeaIce,       // Многолетний морской лед
+
+    // Внутренние водоемы суши (Озёра)
+    FreshwaterLake, // Проточное пресноводное озеро
+    SaltLake,       // Бессточное солёное озеро / внутреннее море
+    LakeIce,        // Замёрзшее озеро (круглогодичный/долгий ледостав)
 
     IceSheet,                 // Полярные ледниковые щиты и вечные снега гор
     AlpineBare,               // Высокогорные скалы, осыпи и гольцы (на Leptosol)
@@ -53,20 +60,20 @@ pub enum MineralResource {
     #[default]
     None,
     Clay,           // Глина (керамика, кирпич, строительные растворы)
-    StoneLimestone, // Строительный камень, мрамор и известняк (крепости, цемент/бетон, флюс)
-    SilicaQuartz,   // Кварцевый песок и кремний (стекло, оптика, микроэлектроника)
-    Salt,           // Каменная и морская соль (консервация еды, снабжение, базовая химия)
-    Copper,         // Медь (бронзовый век, электротехника)
-    Tin,            // Олово (редкий компонент бронзы, ранняя дальняя торговля)
-    Iron,           // Железная руда (оружие, инструменты, сталь, индустриализация)
-    PreciousMetals, // Золото и серебро (валюта, торговля, электроника)
-    SulfurNitre,    // Сера, селитра и фосфаты (порох, взрывчатка, минеральные удобрения)
-    Coal,           // Каменный уголь и торф (металлургия, паровые машины, ТЭЦ)
-    Hydrocarbons,   // Нефть и природный газ (ДВС, авиация, полимеры, нефтехимия)
-    Bauxite,        // Бокситы / Алюминий (авиация, цветная металлургия, ЛЭП)
-    AlloyMetals,    // Титан, никель, хром, кобальт (спецстали, турбины, броня)
-    Uranium,        // Урановые руды (ядерная энергетика и вооружение)
-    RareEarths,     // Редкоземельные металлы и литий (высокие технологии, чипы, батареи)
+    StoneLimestone, // Строительный камень, мрамор и известняк
+    SilicaQuartz,   // Кварцевый песок и кремний
+    Salt,           // Каменная, озёрная и морская соль
+    Copper,         // Медь
+    Tin,            // Олово
+    Iron,           // Железная руда
+    PreciousMetals, // Золото и серебро
+    SulfurNitre,    // Сера, селитра и фосфаты
+    Coal,           // Каменный уголь и торф
+    Hydrocarbons,   // Нефть и природный газ
+    Bauxite,        // Бокситы / Алюминий
+    AlloyMetals,    // Титан, никель, хром, кобальт
+    Uranium,        // Урановые руды
+    RareEarths,     // Редкоземельные металлы и литий
 }
 
 /// Стратегические ресурсы флоры и фауны (9 типов)
@@ -75,15 +82,15 @@ pub enum MineralResource {
 pub enum BioResource {
     #[default]
     None,
-    NavalTimber, // Корабельный и строевой лес (флот, большепролетные балки, крепи шахт)
-    TimberFuel,  // Обычная древесина и дрова (жилье, древесный уголь)
-    FiberCrops,  // Волокнистые культуры: хлопок, лён, конопля (ткани, парусина, канаты)
-    ResinRubber, // Смола, дёготь и каучук (конопатка флота, шины, изоляция, гидроизоляция)
-    LuxuryFlora, // Пряности, чай, кофе, какао, красители (сверхприбыльная торговля)
-    Horses,      // Лошади (степная кавалерия, быстрый транспорт, почта, тягло)
-    Camels,      // Верблюды (караванная торговля через пустыни)
-    ElephantsDraft, // Слоны, буйволы и горные вьючные (тяжелая тяга, высокогорная логистика)
-    FurIvory,    // Пушнина, меха и моржовая/слоновая кость (северная экспансия и престиж)
+    NavalTimber,    // Корабельный и строевой лес
+    TimberFuel,     // Обычная древесина и дрова
+    FiberCrops,     // Волокнистые культуры: хлопок, лён, конопля
+    ResinRubber,    // Смола, дёготь и каучук
+    LuxuryFlora,    // Пряности, чай, кофе, какао, красители
+    Horses,         // Лошади
+    Camels,         // Верблюды
+    ElephantsDraft, // Слоны, буйволы и горные вьючные
+    FurIvory,       // Пушнина, меха и моржовая/слоновая кость
 }
 
 #[derive(Resource, Default, Clone, Serialize, Deserialize)]
@@ -99,26 +106,31 @@ pub struct HydrologyLayer {
     /// Водопроницаемость (инфильтрация) [0.0 .. 1.0]
     pub permeability: Vec<f32>,
 
-    // --- ГИДРОЛОГИЯ И РЕКИ ---
+    // --- ГИДРОЛОГИЯ: РЕКИ И ОЗЁРА ---
     pub runoff: Vec<f32>,
     pub flow_dir: Vec<Option<u8>>,
     pub flow_accumulation: Vec<f32>,
-    pub river_flow_arrows: Vec<(usize, Vec3, f32)>, 
+    pub river_flow_arrows: Vec<(usize, Vec3, f32)>,
 
-    /// Фактическая влажность почвы (от осадков, талых вод и фильтрации из рек) [0.0 .. 1.0]
+    /// Маска клеток, затопленных пресными или солёными озёрами
+    pub lake_mask: Vec<bool>,
+    /// Истина, если озеро бессточное (эндорейное / солёное)
+    pub is_salt_lake: Vec<bool>,
+    /// Глубина озера в данной клетке (`water_level - elevation`)
+    pub lake_depth: Vec<f32>,
+    /// Размер связного озера (в клетках), которому принадлежит данная ячейка
+    pub lake_size: Vec<u32>,
+
+    /// Фактическая влажность почвы (от осадков, талых вод и фильтрации из рек и озёр) [0.0 .. 1.0]
     pub soil_moisture: Vec<f32>,
 
     // --- БИОМЫ ---
     pub biomes: Vec<Biome>,
 
     // --- ПРОДОВОЛЬСТВЕННЫЙ ПОТЕНЦИАЛ (4 СТОЛПА ЕДЫ) [0.0 .. 1.0] ---
-    /// Пахотное земледелие (злаки, рис, корнеплоды, бобовые)
     pub arable_potential: Vec<f32>,
-    /// Пастбищное скотоводство (мясо, молоко, шерсть, кожи)
     pub pastoral_potential: Vec<f32>,
-    /// Собирательство, садоводство и охота (фрукты, ягоды, орехи, виноград, лесная дичь)
     pub foraging_potential: Vec<f32>,
-    /// Рыболовство и морской промысел (шельфы, апвеллинг, крупные реки)
     pub fishery_potential: Vec<f32>,
 
     // --- ИСКОПАЕМЫЕ И БИОРЕСУРСЫ ---
@@ -141,8 +153,16 @@ impl HydrologyLayer {
         self.flow_accumulation.resize(num_cells, 0.0);
         self.river_flow_arrows.clear();
 
-        self.soil_moisture.resize(num_cells, 0.0);
+        self.lake_mask.clear();
+        self.lake_mask.resize(num_cells, false);
+        self.is_salt_lake.clear();
+        self.is_salt_lake.resize(num_cells, false);
+        self.lake_depth.clear();
+        self.lake_depth.resize(num_cells, 0.0);
+        self.lake_size.clear();
+        self.lake_size.resize(num_cells, 0);
 
+        self.soil_moisture.resize(num_cells, 0.0);
         self.biomes.resize(num_cells, Biome::DeepOcean);
 
         self.arable_potential.resize(num_cells, 0.0);
@@ -154,5 +174,15 @@ impl HydrologyLayer {
         self.mineral_richness.resize(num_cells, 0.0);
         self.bio_resources.resize(num_cells, BioResource::None);
         self.bio_richness.resize(num_cells, 0.0);
+    }
+
+    #[inline]
+    pub fn is_lake_cell(&self, cell_id: usize) -> bool {
+        self.lake_mask.get(cell_id).copied().unwrap_or(false)
+    }
+
+    #[inline]
+    pub fn is_water_cell(&self, geology: &GeologyLayer, cell_id: usize) -> bool {
+        geology.is_ocean_cell(cell_id) || self.is_lake_cell(cell_id)
     }
 }

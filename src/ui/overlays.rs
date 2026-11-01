@@ -132,7 +132,13 @@ pub fn generation_progress_overlay(
             ui.separator();
             ui.add_space(2.0);
 
-            draw_task_entries!(ui, content_width, &snap.entries);
+            egui::ScrollArea::vertical()
+                .max_height(340.0)
+                .auto_shrink([false, true])
+                .stick_to_bottom(true)
+                .show(ui, |ui| {
+                    draw_task_entries!(ui, content_width, &snap.entries);
+                });
 
             ui.add_space(6.0);
             ui.add(

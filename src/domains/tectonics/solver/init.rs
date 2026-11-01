@@ -8,13 +8,11 @@ use crate::{
     },
     world::topology::WorldTopology,
 };
-use bevy::math::Vec3;
+use bevy::math::{Quat, Vec3};
 use noise::NoiseFn;
 use rand::RngExt;
-use rayon::prelude::*;
 use std::f32::consts::PI;
 
-/// Создает произвольный единичный вектор в касательной плоскости сферы в точке `normal`
 fn random_tangent(normal: Vec3, angle: f32) -> Vec3 {
     let helper = if normal.y.abs() < 0.9 {
         Vec3::Y
@@ -26,7 +24,6 @@ fn random_tangent(normal: Vec3, angle: f32) -> Vec3 {
     (t1 * angle.cos() + t2 * angle.sin()).normalize_or_zero()
 }
 
-/// Поворачивает вектор `dir` вдоль касательной `tangent` на угол `arc_rad` радиан
 #[inline]
 fn move_on_sphere(dir: Vec3, tangent: Vec3, arc_rad: f32) -> Vec3 {
     if tangent == Vec3::ZERO || arc_rad.abs() < 1e-6 {
@@ -35,13 +32,77 @@ fn move_on_sphere(dir: Vec3, tangent: Vec3, arc_rad: f32) -> Vec3 {
     (dir * arc_rad.cos() + tangent * arc_rad.sin()).normalize_or_zero()
 }
 
-/// Генерирует тектонические плиты: большинство смешанные (со смещенным континентальным кратоном),
-/// а небольшая доля (`pure_oceanic_plate_fraction`, минимум 1) — чисто океанические
+/// Вычисляет степень континентальности коры `[0.0 .. 1.0]` в данной точке для плиты `plate`.
+/// Переводит точку в локальную систему отсчета плиты (`accum_rot.inverse()`), поэтому
+/// материк со всеми полуостровами и заливами жестко вращается вместе со своей плитой!
+#[inline]
+pub(crate) fn craton_continental_factor(
+    warped_dir: Vec3,
+    plate: &Plate,
+) -> f32 {
+    if plate.craton_radius <= 1e-4 {
+        return 0.0;
+    }
+
+    let d_craton = warped_dir.dot(plate.craton_center).clamp(-1.0, 1.0).acos();
+    // Локальные координаты в системе покоя плиты (чтобы форма берегов двигалась вместе с плитой)
+    let local_p = (plate.accum_rot.inverse() * warped_dir).normalize_or_zero();
+    let s = plate.seed_offset;
+
+    // Многочастотная модуляция формы континента (полуострова, заливы, выступы щита)
+    let lobe_1 = (local_p.x * 3.2 + s).sin() * (local_p.z * 3.2 - s * 0.7).cos();
+    let lobe_2 = (local_p.y * 5.7 - s * 1.3).sin() * (local_p.x * 5.1 + local_p.z * 4.8).cos();
+    let lobe_3 = (local_p.z * 9.5 + local_p.y * 8.2 + s * 2.1).sin();
+
+    let shape_mod = 1.0 + lobe_1 * 0.34 + lobe_2 * 0.18 + lobe_3 * 0.08;
+    let effective_radius = (plate.craton_radius * shape_mod).max(0.04);
+
+    // Широкая переходная зона шельфа и материкового склона (0.24 рад), исключающая резкие обрывы
+    let transition_width = 0.24;
+    let inner_edge = (effective_radius - transition_width * 0.55).max(0.0);
+    1.0 - smoothstep((d_craton - inner_edge) / transition_width)
+}
+
+/// Находит 3 ближайшие плиты к точке `dir` (для гладких тройных стыков без разрывов)
+#[inline]
+pub(crate) fn find_closest_plates(
+    dir: Vec3,
+    plates: &[Plate],
+) -> (usize, usize, usize, f32, f32, f32) {
+    let mut dist_1 = f32::MAX;
+    let mut dist_2 = f32::MAX;
+    let mut dist_3 = f32::MAX;
+
+    let mut p1_idx = 0;
+    let mut p2_idx = 0;
+    let mut p3_idx = 0;
+
+    for (i, plate) in plates.iter().enumerate() {
+        let d = dir.dot(plate.center_dir).clamp(-1.0, 1.0).acos();
+        if d < dist_1 {
+            dist_3 = dist_2;
+            p3_idx = p2_idx;
+            dist_2 = dist_1;
+            p2_idx = p1_idx;
+            dist_1 = d;
+            p1_idx = i;
+        } else if d < dist_2 {
+            dist_3 = dist_2;
+            p3_idx = p2_idx;
+            dist_2 = d;
+            p2_idx = i;
+        } else if d < dist_3 {
+            dist_3 = d;
+            p3_idx = i;
+        }
+    }
+    (p1_idx, p2_idx, p3_idx, dist_1, dist_2, dist_3)
+}
+
 pub fn generate_plates(rng: &mut impl RngExt, config: &TectonicsConfig) -> Vec<Plate> {
-    let num_plates = config.num_plates.max(2);
+    let num_plates = config.num_plates.max(3);
     let mut plates = Vec::with_capacity(num_plates);
 
-    // Средний угловой радиус одной плиты на сфере
     let avg_plate_radius = (4.0 * PI / num_plates as f32).sqrt() * 0.56;
     let num_pure_oceanic = ((num_plates as f32 * config.pure_oceanic_plate_fraction).round()
         as usize)
@@ -81,7 +142,6 @@ pub fn generate_plates(rng: &mut impl RngExt, config: &TectonicsConfig) -> Vec<P
         };
         let angular_vel = rng.random_range(config.angular_vel_min..config.angular_vel_max);
 
-        // Индивидуальная базовая высота плиты (случайная плавучесть)
         let var = config.plate_base_height_variance.max(0.0);
         let base_elevation_offset = if var > 0.0 {
             rng.random_range(-var..var)
@@ -89,8 +149,6 @@ pub fn generate_plates(rng: &mut impl RngExt, config: &TectonicsConfig) -> Vec<P
             0.0
         };
 
-        // Первые `num_pure_oceanic` плит делаем чисто океаническими (как Тихоокеанская),
-        // остальные — смешанными с эксцентрично смещенным континентальным кратоном
         let (craton_center, craton_radius) = if i < num_pure_oceanic {
             (best_dir, 0.0)
         } else {
@@ -100,13 +158,12 @@ pub fn generate_plates(rng: &mut impl RngExt, config: &TectonicsConfig) -> Vec<P
             let tangent = random_tangent(best_dir, shift_az);
             let shifted_center = move_on_sphere(best_dir, tangent, shift_dist);
 
-            let cont_scale = (config.continental_ratio as f32).clamp(0.15, 0.85) * 1.65;
-            let radius =
-                avg_plate_radius * cont_scale * rng.random_range(0.75..1.30);
+            let cont_scale = (config.continental_ratio as f32).clamp(0.15, 0.85) * 1.55;
+            let radius = avg_plate_radius * cont_scale * rng.random_range(0.75..1.28);
             (shifted_center, radius)
         };
 
-        // Золотое сечение для равномерного распределения оттенков плит
+        let seed_offset = rng.random_range(0.0..100.0);
         let color_hue = ((i as f32 * 137.50776) % 360.0).clamp(0.0, 360.0);
 
         plates.push(Plate {
@@ -114,9 +171,11 @@ pub fn generate_plates(rng: &mut impl RngExt, config: &TectonicsConfig) -> Vec<P
             euler_pole,
             angular_vel,
             omega: euler_pole * angular_vel,
+            accum_rot: Quat::IDENTITY,
             base_elevation_offset,
             craton_center,
             craton_radius,
+            seed_offset,
             color_hue,
         });
     }
@@ -124,7 +183,6 @@ pub fn generate_plates(rng: &mut impl RngExt, config: &TectonicsConfig) -> Vec<P
     plates
 }
 
-/// Генерирует стационарные мантийные плюмы
 pub fn generate_plumes(rng: &mut impl RngExt, config: &TectonicsConfig) -> Vec<MantlePlume> {
     let mut plumes = Vec::with_capacity(config.hotspot_count);
     for _ in 0..config.hotspot_count {
@@ -140,9 +198,11 @@ pub fn generate_plumes(rng: &mut impl RngExt, config: &TectonicsConfig) -> Vec<M
         }
 
         let strength = rng.random_range(config.hotspot_height_min..config.hotspot_height_max);
-        let radius = config.hotspot_radius_base * rng.random_range(0.85..1.25);
-        let pulse_period = rng.random_range(0.12..0.28);
+        let radius = config.hotspot_radius_base * rng.random_range(0.75..1.35);
+        let pulse_period = rng.random_range(0.12..0.32);
         let pulse_timer = rng.random_range(0.0..pulse_period);
+        let next_eruption_dist =
+            config.hotspot_spacing_rad * rng.random_range(0.35..1.85);
 
         plumes.push(MantlePlume {
             position: pos,
@@ -150,13 +210,13 @@ pub fn generate_plumes(rng: &mut impl RngExt, config: &TectonicsConfig) -> Vec<M
             radius,
             pulse_timer,
             pulse_period,
+            next_eruption_dist,
+            eruption_counter: rng.random_range(0..100),
         });
     }
     plumes
 }
 
-/// Совместимая с `generator.rs` функция: создает стартовые точки вулканов над плюмами.
-/// Сами вулканические цепи теперь рождаются честно в процессе движения плит над плюмами!
 pub fn generate_hotspots(
     rng: &mut impl RngExt,
     plates: &[Plate],
@@ -186,10 +246,9 @@ pub fn generate_hotspots(
         .collect()
 }
 
-/// Инициализирует физические поля коры (толщину, плотность, возраст) перед запуском шагов движения
 pub fn init_tectonics(
     topology: &WorldTopology,
-    _cache: &TectonicsGeometryCache,
+    cache: &TectonicsGeometryCache,
     geology: &mut GeologyLayer,
     noise: &(impl NoiseFn<f64, 3> + Sync),
     config: &TectonicsConfig,
@@ -198,7 +257,6 @@ pub fn init_tectonics(
     geology.resize(num_cells);
     geology.sim_step = 0;
 
-    // Если плюмы еще не инициализированы, извлекаем их стационарные позиции из стартовых вулканов
     if geology.plumes.is_empty() {
         geology.plumes = geology
             .volcanoes
@@ -208,128 +266,17 @@ pub fn init_tectonics(
                 position: v.center.normalize_or_zero(),
                 strength: v.height.clamp(config.hotspot_height_min, config.hotspot_height_max),
                 radius: v.radius.max(config.volcano_radius_min),
-                pulse_period: 0.16 + (idx % 5) as f32 * 0.03,
+                pulse_period: 0.16 + (idx % 5) as f32 * 0.04,
                 pulse_timer: (idx % 3) as f32 * 0.05,
+                next_eruption_dist: config.hotspot_spacing_rad
+                    * (0.5 + ((idx * 37) % 10) as f32 * 0.14),
+                eruption_counter: (idx as u32).wrapping_mul(17),
             })
             .collect();
     }
-    // Очищаем список вулканов: они честно нарисуются по мере прохода плит над плюмами
     geology.volcanoes.clear();
 
-    let plates = &geology.plates;
-    if plates.is_empty() {
-        return;
-    }
-
-    let plate_ids = &mut geology.plate_ids;
-    let thickness = &mut geology.crust_thickness;
-    let density = &mut geology.crust_density;
-    let age = &mut geology.crust_age;
-    let sediment = &mut geology.sediment_thickness;
-    let stress = &mut geology.tectonic_stress;
-    let orogeny = &mut geology.orogeny_root;
-    let shifts = &mut geology.subcell_shift;
-
-    plate_ids
-        .par_iter_mut()
-        .zip(thickness.par_iter_mut())
-        .zip(density.par_iter_mut())
-        .zip(age.par_iter_mut())
-        .zip(sediment.par_iter_mut())
-        .zip(stress.par_iter_mut())
-        .zip(orogeny.par_iter_mut())
-        .zip(shifts.par_iter_mut())
-        .enumerate()
-        .for_each(
-            |(
-                cell_id,
-                (
-                    (
-                        (((((p_out, thick_out), dens_out), age_out), sed_out), stress_out),
-                        orog_out,
-                    ),
-                    shift_out,
-                ),
-            )| {
-                let dir = topology.cells[cell_id].center;
-                let p = dir.as_dvec3() * config.warp_scale;
-                let offsets = &config.warp_offsets;
-
-                let wx = noise.get([
-                    p.x + offsets[0][0],
-                    p.y + offsets[0][1],
-                    p.z + offsets[0][2],
-                ]) as f32;
-                let wy = noise.get([
-                    p.x + offsets[1][0],
-                    p.y + offsets[1][1],
-                    p.z + offsets[1][2],
-                ]) as f32;
-                let wz = noise.get([
-                    p.x + offsets[2][0],
-                    p.y + offsets[2][1],
-                    p.z + offsets[2][2],
-                ]) as f32;
-
-                let warped_dir =
-                    (dir + Vec3::new(wx, wy, wz) * config.warp_strength).normalize_or_zero();
-
-                // Находим ближайшую плиту для ячейки
-                let mut best_plate = 0;
-                let mut best_dist = f32::MAX;
-                for (i, plate) in plates.iter().enumerate() {
-                    let d = warped_dir.dot(plate.center_dir).clamp(-1.0, 1.0).acos();
-                    if d < best_dist {
-                        best_dist = d;
-                        best_plate = i;
-                    }
-                }
-
-                *p_out = best_plate;
-                let plate = &plates[best_plate];
-
-                // Определяем, попадает ли клетка в континентальный кратон плиты
-                let craton_noise =
-                    noise.get([p.x * 1.35 - 19.2, p.y * 1.35 + 27.4, p.z * 1.35 - 8.1]) as f32;
-                let d_craton = warped_dir.dot(plate.craton_center).clamp(-1.0, 1.0).acos();
-                let effective_radius =
-                    (plate.craton_radius * (1.0 + craton_noise * 0.38)).max(0.0);
-
-                // Плавная переходная зона (континентальный шельф и склон) шириной 0.14 рад
-                let shelf_width = 0.14;
-                let cont_factor = if effective_radius <= 1e-4 {
-                    0.0
-                } else {
-                    1.0 - smoothstep((d_craton - (effective_radius - shelf_width)) / shelf_width)
-                };
-
-                if cont_factor > 0.05 {
-                    // Смешанная/континентальная кора (ядро кратона + пассивный шельф по краю)
-                    let shield_var = craton_noise * 3.5;
-                    *thick_out = config.ocean_crust_thickness_km
-                        + cont_factor
-                            * (config.cont_crust_thickness_km - config.ocean_crust_thickness_km)
-                        + shield_var * cont_factor;
-                    *dens_out = config.old_ocean_density
-                        - cont_factor * (config.old_ocean_density - config.cont_crust_density);
-                    *age_out = 0.4 + cont_factor * (2.5 + craton_noise.abs());
-                    *sed_out = 0.25 + (1.0 - cont_factor) * cont_factor * 2.2;
-                    // Древние остаточные складчатые пояса внутри кратона
-                    *orog_out = (craton_noise - 0.35).max(0.0) * 0.35 * cont_factor;
-                } else {
-                    // Океаническая кора по краям смешанной плиты или на чисто океанической плите
-                    let age_init = (d_craton * 0.65).clamp(0.08, config.oceanic_mature_age * 0.85);
-                    let cooling = (age_init / config.oceanic_mature_age).clamp(0.0, 1.0).sqrt();
-                    *thick_out = config.ocean_crust_thickness_km;
-                    *dens_out = config.young_ocean_density
-                        + cooling * (config.old_ocean_density - config.young_ocean_density);
-                    *age_out = age_init;
-                    *sed_out = 0.08 * cooling;
-                    *orog_out = 0.0;
-                }
-
-                *stress_out = 0.0;
-                *shift_out = [0.0; 3];
-            },
-        );
+    // Первичное заполнение коры из текущего положения плит и кратонов
+    super::boundaries::project_plates_and_boundaries(topology, cache, geology, config, 0.0);
+    let _ = noise;
 }

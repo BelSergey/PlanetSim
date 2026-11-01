@@ -14,6 +14,7 @@ pub use lithology::finalize_tectonics;
 
 use super::{tectonics_config::TectonicsConfig, tectonics_data::GeologyLayer};
 use crate::world::topology::WorldTopology;
+use crate::domains::generator::GenerationLogger;
 use bevy::math::Vec3;
 use noise::{Fbm, NoiseFn, Perlin};
 use std::f32::consts::PI;
@@ -169,7 +170,7 @@ pub fn step_tectonics(
     boundaries::apply_boundary_and_plume_processes(topology, cache, geology, scratch, config, dt);
 
     // 5–6. Пересчитываем рельеф через изостазию и применяем эрозию с осадконакоплением
-    isostasy::update_isostasy_and_erosion(cache, geology, scratch, config, dt);
+    isostasy::update_isostasy_and_erosion(topology, cache, geology, scratch, config, dt);
 
     geology.sim_step = geology.sim_step.wrapping_add(1);
 }
@@ -181,6 +182,7 @@ pub fn simulate_tectonics(
     geology: &mut GeologyLayer,
     noise: &(impl NoiseFn<f64, 3> + Sync),
     config: &TectonicsConfig,
+    logger: &GenerationLogger,
 ) {
     let cache = TectonicsGeometryCache::get_or_build(topology);
     let mut scratch = TectonicsScratch::default();
@@ -191,12 +193,16 @@ pub fn simulate_tectonics(
     // 1..N. Цикл пошагового движения плит
     let steps = config.simulation_steps;
     let dt = config.time_step;
+    logger.start_step(format!(
+        "Тектоника: симуляция движения плит и субдукции ({} шагов)...",
+        steps
+    ));
     for _ in 0..steps {
         step_tectonics(topology, &cache, geology, &mut scratch, config, dt);
     }
 
     // Финализация: горный и детальный шум, умный поиск океанов, континентальность и породы
-    lithology::finalize_tectonics(topology, &cache, geology, noise, config);
+    lithology::finalize_tectonics(topology, &cache, geology, noise, config, Some(logger));
 }
 
 /// Удобная обертка для вызова ровно одного тика симуляции из UI / реалтайма с обновлением карты
@@ -205,6 +211,7 @@ pub fn step_tectonics_realtime(
     topology: &WorldTopology,
     geology: &mut GeologyLayer,
     config: &TectonicsConfig,
+    logger: &GenerationLogger,
 ) {
     if geology.plates.is_empty() || geology.crust_thickness.len() != topology.cells.len() {
         return;
@@ -221,5 +228,5 @@ pub fn step_tectonics_realtime(
         config,
         config.time_step,
     );
-    lithology::finalize_tectonics(topology, &cache, geology, &perlin, config);
+    lithology::finalize_tectonics(topology, &cache, geology, &perlin, config, Some(logger));
 }

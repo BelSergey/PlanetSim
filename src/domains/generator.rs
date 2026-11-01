@@ -31,6 +31,13 @@ use crate::{
     },
 };
 
+/// Точное количество шагов логгера в каждом домене
+const TECTONICS_STEPS: usize = 4;
+const CLIMATE_STEPS: usize = 3;
+const HYDROLOGY_STEPS: usize = 5;
+/// Дополнительные шаги при включенной обратной связи (1 шаг фидбека + Климат + Биосфера)
+const COUPLED_EXTRA_STEPS: usize = 1 + CLIMATE_STEPS + HYDROLOGY_STEPS;
+
 /// Ресурс-запрос: позволяет UI или хоткеям заказать фоновую генерацию без блокировки экрана
 #[derive(Resource, Default)]
 pub struct GenerationRequest(pub Option<PipelineStage>);
@@ -194,7 +201,6 @@ pub fn spawn_generation_task(
     };
     next_state.set(AppState::InGame);
 
-    // Если старая задача еще крутилась, отменяем её
     for entity in existing_tasks.iter() {
         commands.entity(entity).despawn();
     }
@@ -222,11 +228,15 @@ pub fn spawn_generation_task(
 
     let coupled = h_config.coupled_climate_feedback;
     let base_steps = match stage {
-        PipelineStage::Tectonics => 6, // 2 (Тектоника) + 3 (Климат) + 1 (Гидрология)
-        PipelineStage::Climate => 4,   // 3 (Климат) + 1 (Гидрология)
-        PipelineStage::Hydrology => 1, // 1 (Гидрология)
+        PipelineStage::Tectonics => TECTONICS_STEPS + CLIMATE_STEPS + HYDROLOGY_STEPS,
+        PipelineStage::Climate => CLIMATE_STEPS + HYDROLOGY_STEPS,
+        PipelineStage::Hydrology => HYDROLOGY_STEPS,
     };
-    let total_steps = if coupled { base_steps + 5 } else { base_steps };
+    let total_steps = if coupled {
+        base_steps + COUPLED_EXTRA_STEPS
+    } else {
+        base_steps
+    };
 
     let logger = GenerationLogger::new(total_steps);
     let logger_clone = logger.clone();
@@ -238,11 +248,12 @@ pub fn spawn_generation_task(
 
     let task = thread_pool.spawn(async move {
         let _ = thread_priority::set_current_thread_priority(thread_priority::ThreadPriority::Min);
-        // Шаг 1–2: Тектоника (если нужна)
+
+        // === 1. ТЕКТОНИКА (4 шага внутри, если нужна) ===
         let (geology_ref, new_geology) = if let Some(geo) = existing_geology {
             (geo, None)
         } else {
-            logger_clone.start_step("Формирование тектонических плит и вулканов...");
+            logger_clone.start_step("Тектоника: генерация плит, кратонов и плюмов...");
             let mut rng = StdRng::seed_from_u64(seed as u64);
             let perlin = Fbm::<Perlin>::new(seed);
 
@@ -251,8 +262,7 @@ pub fn spawn_generation_task(
             geology.plates = generate_plates(&mut rng, &t_config);
             geology.volcanoes = generate_hotspots(&mut rng, &geology.plates, &t_config);
 
-            logger_clone.start_step("Симуляция движения коры и литологии...");
-            simulate_tectonics(&topology, &mut geology, &perlin, &t_config);
+            simulate_tectonics(&topology, &mut geology, &perlin, &t_config, &logger_clone);
 
             let geo_clone = geology.clone();
             (geo_clone, Some(geology))
@@ -260,10 +270,9 @@ pub fn spawn_generation_task(
 
         let mut hydrology = HydrologyLayer::default();
 
-        // Шаг 3+: Климат и Гидрология
+        // === 2. КЛИМАТ И БИОСФЕРА / ГИДРОЛОГИЯ ===
         let (climate_ref, new_climate) = if let Some(mut clim) = existing_climate {
-            // Заказан пересчет со стадии Hydrology
-            logger_clone.start_step("Формирование почв (CLORPT), рек и биомов...");
+            // Заказан пересчет только со стадии Hydrology (5 шагов внутри)
             simulate_hydrology(
                 &topology,
                 &geology_ref,
@@ -271,10 +280,11 @@ pub fn spawn_generation_task(
                 &mut hydrology,
                 &h_config,
                 seed,
+                &logger_clone,
             );
 
             if coupled {
-                logger_clone.start_step("Обратная связь: влияние биомов на альбедо и влагу...");
+                logger_clone.start_step("Обратная связь: влияние биомов и озёр на климат...");
                 apply_surface_feedback_to_climate(
                     &geology_ref,
                     &mut clim,
@@ -290,8 +300,6 @@ pub fn spawn_generation_task(
                     seed,
                     &logger_clone,
                 );
-
-                logger_clone.start_step("Финальный пересчет водного баланса и биомов...");
                 simulate_hydrology(
                     &topology,
                     &geology_ref,
@@ -299,6 +307,7 @@ pub fn spawn_generation_task(
                     &mut hydrology,
                     &h_config,
                     seed,
+                    &logger_clone,
                 );
                 let c_clone = clim.clone();
                 (c_clone, Some(clim))
@@ -306,7 +315,7 @@ pub fn spawn_generation_task(
                 (clim, None)
             }
         } else {
-            // Проход 1: Первичный климат и первичная гидрология/биомы
+            // Проход 1: Первичный климат (3 шага) + Первичная биосфера (5 шагов)
             let mut climate = ClimateLayer::default();
             climate.resize(topology.cells.len());
             climate.reset_surface_defaults(
@@ -323,7 +332,6 @@ pub fn spawn_generation_task(
                 &logger_clone,
             );
 
-            logger_clone.start_step("Формирование почв (CLORPT), рек и биомов...");
             simulate_hydrology(
                 &topology,
                 &geology_ref,
@@ -331,11 +339,12 @@ pub fn spawn_generation_task(
                 &mut hydrology,
                 &h_config,
                 seed,
+                &logger_clone,
             );
 
-            // Проход 2: Обратная связь (Биомы + Реки + Почвы -> Альбедо + Испарение -> Климат -> Гидрология)
+            // Проход 2: Обратная связь (1 шаг + 3 шага климата + 5 шагов биосферы)
             if coupled {
-                logger_clone.start_step("Обратная связь: влияние биомов на альбедо и влагу...");
+                logger_clone.start_step("Обратная связь: влияние биомов и озёр на климат...");
                 apply_surface_feedback_to_climate(
                     &geology_ref,
                     &mut climate,
@@ -351,8 +360,6 @@ pub fn spawn_generation_task(
                     seed,
                     &logger_clone,
                 );
-
-                logger_clone.start_step("Финальный пересчет водного баланса и биомов...");
                 simulate_hydrology(
                     &topology,
                     &geology_ref,
@@ -360,6 +367,7 @@ pub fn spawn_generation_task(
                     &mut hydrology,
                     &h_config,
                     seed,
+                    &logger_clone,
                 );
             }
 
@@ -409,14 +417,19 @@ pub fn handle_generation_task(
             *hydrology = gen_hydrology;
             pipeline.rebuild_rivers = true;
 
-            prepare_civilization_substrate(&topology, &geology, &climate, &hydrology, &mut civ, world_config.seed);
+            prepare_civilization_substrate(
+                &topology,
+                &geology,
+                &climate,
+                &hydrology,
+                &mut civ,
+                world_config.seed,
+            );
 
-            // Фиксируем окончание в логгере и освобождаем Task
             gen_task.logger.finish();
             gen_task.task = None;
         }
     } else if gen_task.logger.finished_elapsed_ms() >= 600 {
-        // Держим окно лога 0.6 сек после 100% готовности, чтобы пользователь увидел результат
         commands.entity(entity).despawn();
     }
 }

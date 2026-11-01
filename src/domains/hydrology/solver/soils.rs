@@ -24,33 +24,18 @@ pub(super) fn compute_soils(
     let num_cells = topology.cells.len();
 
     for i in 0..num_cells {
-        let elev = geology.elevations[i];
-
-        // Океаническое дно не имеет наземного почвенного профиля
-        if elev <= 0.0 {
-            let wk = climate.water_kind.get(i).copied().unwrap_or(WaterKind::Ocean);
-            match wk {
-                WaterKind::Lake => {
-                    // Донные отложения озера: органический ил + глина (прокси Gleysol)
-                    hydrology.soils[i] = SoilType::Gleysol;
-                    hydrology.soil_texture[i] = [0.15, 0.40, 0.45];
-                    hydrology.soil_depth[i] = 0.5;
-                    hydrology.water_capacity[i] = 1.0;
-                    hydrology.permeability[i] = 0.01;
-                }
-                WaterKind::Ocean => {
-                    hydrology.soils[i] = SoilType::Ocean;
-                    hydrology.soil_texture[i] = [0.0, 0.3, 0.7];
-                    hydrology.soil_depth[i] = 0.0;
-                    hydrology.water_capacity[i] = 1.0;
-                    hydrology.permeability[i] = 0.0;
-                }
-                WaterKind::Land => unreachable!(),
-            }
+        // Только настоящий океан получает морское дно; сухие впадины с elev <= 0.0 считаются как суша!
+        if geology.is_ocean_cell(i) {
+            hydrology.soils[i] = SoilType::Ocean;
+            hydrology.soil_texture[i] = [0.0, 0.3, 0.7];
+            hydrology.soil_depth[i] = 0.0;
+            hydrology.water_capacity[i] = 1.0;
+            hydrology.permeability[i] = 0.0;
             continue;
         }
 
-        // 1. Климатические показатели за год (Весна/Осень имеет двойной вес в цикле года)
+        let elev = geology.elevations[i];
+
         let t_spring = climate.spring.temperatures[i];
         let t_summer = climate.summer.temperatures[i];
         let t_winter = climate.winter.temperatures[i];
@@ -62,18 +47,15 @@ pub(super) fn compute_soils(
         let p_winter = climate.winter.precipitation[i];
         let annual_precip = (2.0 * p_spring + p_summer + p_winter) * 0.25;
 
-        // Потенциальная испаряемость (PET) по температуре и индекс влажности (P / PET)
         let pet = ((mean_temp + 10.0).max(2.0) * 0.022 * config.aridity_evap_scale).max(0.05);
         let moisture_index = annual_precip / pet;
 
-        // Когерентные возмущения для неровных природных границ почвенных поясов
         let t_jit = noise.temp_jitter[i] * 1.4;
         let m_jit = noise.moisture_jitter[i];
         let eff_mean_temp = mean_temp + t_jit;
         let eff_warm_temp = warm_season_temp + t_jit * 0.8;
         let eff_moisture_index = (moisture_index * (1.0 + m_jit * 0.14)).max(0.0);
 
-        // 2. Рельеф: максимальный уклон и локальная вогнутость (низина vs хребет)
         let neighbors = &topology.cells[i].neighbors;
         let mut max_slope = 0.0_f32;
         let mut neighbor_elev_sum = 0.0_f32;
@@ -91,26 +73,19 @@ pub(super) fn compute_soils(
         } else {
             elev
         };
-        // Положительный valley_concavity означает ложбину/котловину, где скапливается ил
         let valley_concavity = (avg_n_elev - elev).clamp(-0.05, 0.05);
 
         let rugged = geology.terrain_ruggedness.get(i).copied().unwrap_or(0.0);
         let effective_slope = max_slope.max(rugged * 0.055);
 
-        // 3. Материнская порода -> Базовая текстура [sand, silt, clay]
         let rock = geology.lithology[i];
         let [mut sand, mut silt, mut clay] = rock.base_texture();
 
-        // 4. Модификация текстуры климатом и рельефом (CLORPT)
-        // Химическое выветривание (жара + влага переводят песок и ил во вторичные глины)
         let heat_factor = ((eff_mean_temp - 5.0) / 25.0).clamp(0.0, 1.2);
         let wet_factor = (eff_moisture_index * 0.6).clamp(0.0, 1.2);
         let chem_weathering = heat_factor * wet_factor * config.chemical_weathering_rate;
 
-        // Физическое морозное выветривание (холод дробит породу в пылеватый ил и песок)
         let frost_weathering = ((5.0 - eff_mean_temp) / 25.0).clamp(0.0, 0.45);
-
-        // Смыв мелких фракций со склонов и аккумуляция в ложбинах
         let slope_wash = (effective_slope * config.slope_erosion_sensitivity).clamp(0.0, 0.75);
         let basin_deposition = (valley_concavity * 12.0).clamp(0.0, 0.35);
 
@@ -131,7 +106,6 @@ pub(super) fn compute_soils(
         clay /= tex_sum;
         hydrology.soil_texture[i] = [sand, silt, clay];
 
-        // 5. Мощность почвенного профиля (глубина)
         let climate_depth_mod =
             (0.45 + 0.55 * (wet_factor * 0.7 + heat_factor * 0.3)).clamp(0.3, 1.0);
         let slope_depth_factor =
@@ -139,10 +113,8 @@ pub(super) fn compute_soils(
         let depth = (slope_depth_factor * climate_depth_mod).clamp(0.08, 1.0);
         hydrology.soil_depth[i] = depth;
 
-        // 6. Педотрансферные функции: Влагоемкость (WHC) и Водопроницаемость
         let is_permafrost = eff_mean_temp < config.permafrost_temp_threshold || eff_warm_temp < 3.0;
 
-        // Ил и суглинки лучше всего удерживают доступную растениям воду; вулканический пепел (Andisol) повышает WHC
         let volcanic_bonus = if geology.volcano_mask[i] || rock == RockType::Andesite {
             1.25
         } else {
@@ -151,15 +123,13 @@ pub(super) fn compute_soils(
         let specific_whc = (0.12 * sand + 0.52 * silt + 0.38 * clay) * volcanic_bonus;
         hydrology.water_capacity[i] = (specific_whc * (0.25 + 0.75 * depth)).clamp(0.05, 1.0);
 
-        // Проницаемость: максимальна в песках и карсте, блокируется глиной и вечной мерзлотой
         let raw_perm = sand * 0.82 + silt * 0.24 + clay * 0.04 + rock.karst_permeability();
         hydrology.permeability[i] = if is_permafrost {
-            0.03 // Мерзлота работает как водоупор
+            0.03
         } else {
             (raw_perm * (0.4 + 0.6 * depth)).clamp(0.02, 1.0)
         };
 
-        // 7. Итоговая классификация почвенного типа (SoilType)
         hydrology.soils[i] = classify_soil_type(
             eff_mean_temp,
             eff_warm_temp,
@@ -190,42 +160,27 @@ fn classify_soil_type(
     is_hotspot: bool,
     config: &HydrologyConfig,
 ) -> SoilType {
-    // 1. Крутые горные склоны и скальные гребни -> Литоземы / Скелетные почвы
     if max_slope > config.mountain_slope_threshold || depth < 0.18 {
         return SoilType::Leptosol;
     }
-
-    // 2. Зона вечной мерзлоты и полярных тундр -> Мерзлотные почвы (Гелисоли)
     if mean_temp < config.permafrost_temp_threshold || warm_season_temp < 4.0 {
         return SoilType::Gelisol;
     }
-
-    // 3. Молодые вулканические породы (при достаточном увлажнении) -> Андисоли
     if (is_hotspot || rock == RockType::Andesite) && moisture_index > 0.28 {
         return SoilType::Andisol;
     }
-
-    // 4. Экстремально засушливый климат -> Пустынные почвы (Аридисоли / Сероземы)
     if moisture_index < 0.24 {
         return SoilType::Aridisol;
     }
-
-    // 5. Плоские глинистые переувлажненные низины -> Болотные и пойменные Глееземы
     if elev < 0.08 && max_slope < 0.008 && moisture_index > 0.85 && clay > 0.34 {
         return SoilType::Gleysol;
     }
-
-    // 6. Жаркие влажные тропики и субтропики -> Латериты (Красноземы / Оксисоли)
     if mean_temp > 19.5 && moisture_index > 0.72 {
         return SoilType::Laterite;
     }
-
-    // 7. Умеренно-сухие и семигумидные степи/лесостепи -> Черноземы
     if (1.5..=19.0).contains(&mean_temp) && (0.24..=0.64).contains(&moisture_index) {
         return SoilType::Chernozem;
     }
-
-    // 8. Прохладные влажные хвойные леса и кислые породы -> Подзолы
     if mean_temp < 9.5 && moisture_index >= 0.55
         || (mean_temp < 13.5
             && sand > 0.48
@@ -233,7 +188,5 @@ fn classify_soil_type(
     {
         return SoilType::Podzol;
     }
-
-    // 9. Умеренно-теплые влажные регионы -> Буроземы (Cambisol)
     SoilType::Cambisol
 }

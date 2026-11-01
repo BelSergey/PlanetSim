@@ -154,7 +154,7 @@ impl Default for TectonicsConfig {
             mantle_density: 3300.0,
             oceanic_mature_age: 1.2,
 
-            edge_threshold: 0.22,
+            edge_threshold: 0.4,
             convergence_thickening_rate: 26.0,
             rift_thinning_rate: 19.0,
             trench_depth_amp: 0.24,
@@ -185,9 +185,9 @@ impl Default for TectonicsConfig {
             warp_offsets: [[12.3, 45.6, 78.9], [98.7, 65.4, 32.1], [55.5, 11.1, 99.9]],
             boundary_noise_scale: 14.0,
             boundary_noise_base: 0.65,
-            boundary_noise_amp: 0.32,
+            boundary_noise_amp: 0.55,
             detail_noise_scale: 4.5,
-            detail_noise_amp: 0.14,
+            detail_noise_amp: 0.2,
             elevation_min_clamp: -0.90,
 
             min_ocean_size_ratio: 0.015,

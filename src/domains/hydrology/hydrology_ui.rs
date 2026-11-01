@@ -15,12 +15,12 @@ pub fn draw_hydrology_tab_system(
     mut gen_req: ResMut<GenerationRequest>,
     mut pipeline: ResMut<WorldPipeline>,
 ) {
-    ui.heading("Почвы и Гидрология");
+    ui.heading("Биосфера и Поверхность");
     ui.separator();
 
     let regen_btn = ui.add_sized(
         [ui.available_width(), 40.0],
-        egui::Button::new("Пересчитать почвы, реки, биомы и ресурсы"),
+        egui::Button::new("Пересчитать почвы, озёра, реки и биомы"),
     );
     if regen_btn.clicked() {
         gen_req.request(PipelineStage::Hydrology);
@@ -50,15 +50,22 @@ pub fn draw_hydrology_tab_system(
 
     ui.add_space(10.0);
     ui.separator();
-    ui.label("2. Речная сеть:");
+    ui.label("2. Реки и Озёра:");
 
     ui.add(egui::Slider::new(&mut config.runoff_multiplier, 0.2..=3.0).text("Множитель стока"));
     ui.add(
         egui::Slider::new(&mut config.lithology_erosion_bias, 0.0..=0.05)
             .text("Влияние мягкости пород"),
     );
+    ui.add(
+        egui::Slider::new(&mut config.min_lake_depth, 0.0005..=0.015)
+            .text("Мин. глубина чаши озера"),
+    );
+    ui.add(
+        egui::Slider::new(&mut config.lake_evaporation_scale, 0.3..=2.5)
+            .text("Испарение с озёр (пресные ↔ солёные)"),
+    );
 
-    // Эти два ползунка перестраивают 3D-меш рек мгновенно прямо при перетаскивании!
     let mut mesh_changed = false;
     mesh_changed |= ui
         .add(
@@ -73,7 +80,7 @@ pub fn draw_hydrology_tab_system(
 
     ui.add(
         egui::Slider::new(&mut config.river_groundwater_seepage, 0.0..=2.5)
-            .text("Подпитка почвы от рек"),
+            .text("Подпитка почвы от рек и озёр"),
     );
     ui.checkbox(
         &mut config.coupled_climate_feedback,

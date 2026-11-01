@@ -279,7 +279,8 @@ pub fn build_river_mesh(
         let real_h = elevations[cell_id];
         let my_flow = flows[cell_id];
         let cell_is_ocean = geology.is_ocean.get(cell_id).copied().unwrap_or(real_h <= 0.0);
-        if cell_is_ocean || my_flow < threshold {
+        let cell_is_water = hydrology.is_water_cell(geology, cell_id);
+        if cell_is_water || my_flow < threshold {
             continue;
         }
         let Some(out_k_u8) = flow_dirs[cell_id] else {

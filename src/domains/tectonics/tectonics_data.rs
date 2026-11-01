@@ -14,12 +14,16 @@ pub struct Plate {
     pub angular_vel: f32,
     /// Полный вектор угловой скорости `omega = euler_pole * angular_vel`
     pub omega: Vec3,
+    /// Накопленный поворот плиты от начала симуляции (переводит координаты в локальную систему плиты)
+    pub accum_rot: Quat,
     /// Индивидуальная базовая высота (изостатический/мантийный подпор плиты)
     pub base_elevation_offset: f32,
-    /// Центр континентального кратона (смещен относительно `center_dir`)
+    /// Центр континентального кратона (смещен относительно `center_dir`, вращается вместе с плитой)
     pub craton_center: Vec3,
     /// Угловой радиус кратона в радианах (`0.0` для чисто океанической плиты вроде Тихоокеанской)
     pub craton_radius: f32,
+    /// Индивидуальное смещение фазы шума для уникальной формы континента
+    pub seed_offset: f32,
     /// Стабильный оттенок цвета плиты `[0.0 .. 360.0]` для карты плит
     pub color_hue: f32,
 }
@@ -31,9 +35,11 @@ impl Default for Plate {
             euler_pole: Vec3::Y,
             angular_vel: 0.0,
             omega: Vec3::ZERO,
+            accum_rot: Quat::IDENTITY,
             base_elevation_offset: 0.0,
             craton_center: Vec3::Y,
             craton_radius: 0.0,
+            seed_offset: 0.0,
             color_hue: 0.0,
         }
     }
@@ -47,6 +53,10 @@ pub struct MantlePlume {
     pub radius: f32,
     pub pulse_timer: f32,
     pub pulse_period: f32,
+    /// Дистанция дрейфа плиты до следующего извержения (меняется стохастически после каждого выброса)
+    pub next_eruption_dist: f32,
+    /// Счётчик извержений плюма для детерминированной вариации высоты/радиуса/пауз
+    pub eruption_counter: u32,
 }
 
 /// Вулкан, привязанный к конкретной плите и дрейфующий вместе с ней
@@ -76,7 +86,6 @@ pub enum RockType {
 }
 
 impl RockType {
-    /// Базовая текстура выветривания породы: `[sand, silt, clay]` (в сумме = 1.0) для модели почв CLORPT
     #[inline]
     pub fn base_texture(self) -> [f32; 3] {
         match self {
@@ -90,7 +99,6 @@ impl RockType {
         }
     }
 
-    /// Податливость породы размыву реками (0.1 — сверхтвердый гранит, 1.0 — мягкие глины)
     #[inline]
     pub fn erodibility(self) -> f32 {
         match self {
@@ -104,7 +112,6 @@ impl RockType {
         }
     }
 
-    /// Коэффициент карстовых/глубоких потерь стока
     #[inline]
     pub fn karst_permeability(self) -> f32 {
         match self {
@@ -123,26 +130,15 @@ pub struct GeologyLayer {
     pub plate_ids: Vec<usize>,
     pub elevations: Vec<f32>,
 
-    // Физические параметры клетки коры
-    /// Толщина коры в км (~7 км молодая океаническая, ~35 км континентальный кратон, до ~70 км в коллизии)
     pub crust_thickness: Vec<f32>,
-    /// Эффективная плотность коры и литосферы в кг/м³ (~2700 континент, ~2900..3140 океаническая)
     pub crust_density: Vec<f32>,
-    /// Возраст коры в условных млн лет (0 на оси спрединга, растет на каждом шаге)
     pub crust_age: Vec<f32>,
-    /// Толщина осадочного чехла в км
     pub sediment_thickness: Vec<f32>,
-    /// Тектоническое напряжение границы: `< 0` рифт/спрединг, `> 0` субдукция/коллизия
     pub tectonic_stress: Vec<f32>,
-    /// Накопленный корень складчатости / орогенеза `[0.0 .. 1.0]`
     pub orogeny_root: Vec<f32>,
-    /// Субклеточное накопленное смещение на сфере (для защиты континентов от численного размытия)
     pub subcell_shift: Vec<[f32; 3]>,
 
-    // Океаны и континентальность (вычисляются сразу после рельефа)
-    /// Истина только для настоящих океанических бассейнов (прошедших порог площади и абиссальной глубины)
     pub is_ocean: Vec<bool>,
-    /// Знаковая континентальность `[-1.0 .. +1.0]` (-1 открытый океан, 0 берег, +1 глубь материка)
     pub continentality: Vec<f32>,
 
     pub plates: Vec<Plate>,
@@ -152,7 +148,6 @@ pub struct GeologyLayer {
     pub lithology: Vec<RockType>,
     pub terrain_ruggedness: Vec<f32>,
 
-    /// Счетчик выполненных шагов симуляции движения плит
     pub sim_step: u32,
 }
 
@@ -160,9 +155,9 @@ impl GeologyLayer {
     pub fn resize(&mut self, num_cells: usize) {
         self.plate_ids.resize(num_cells, 0);
         self.elevations.resize(num_cells, 0.0);
-        self.crust_thickness.resize(num_cells, 7.5);
+        self.crust_thickness.resize(num_cells, 7.0);
         self.crust_density.resize(num_cells, 2950.0);
-        self.crust_age.resize(num_cells, 20.0);
+        self.crust_age.resize(num_cells, 0.5);
         self.sediment_thickness.resize(num_cells, 0.1);
         self.tectonic_stress.resize(num_cells, 0.0);
         self.orogeny_root.resize(num_cells, 0.0);
@@ -176,7 +171,7 @@ impl GeologyLayer {
 
     #[inline]
     pub fn is_continental_crust(&self, cell_id: usize) -> bool {
-        self.crust_density[cell_id] < 2825.0 || self.crust_thickness[cell_id] >= 19.0
+        self.crust_density[cell_id] < 2825.0 || self.crust_thickness[cell_id] >= 18.5
     }
 
     /// Истина, если клетка принадлежит настоящему океану (а не сухой впадине на суше)

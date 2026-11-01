@@ -5,12 +5,16 @@ use super::{
     TectonicsGeometryCache,
 };
 use crate::{
-    domains::tectonics::{
-        tectonics_config::TectonicsConfig,
-        tectonics_data::{GeologyLayer, RockType},
+    domains::{
+        generator::GenerationLogger,
+        tectonics::{
+            tectonics_config::TectonicsConfig,
+            tectonics_data::{GeologyLayer, RockType},
+        },
     },
     world::topology::WorldTopology,
 };
+use bevy::math::Vec3;
 use noise::NoiseFn;
 use rayon::prelude::*;
 
@@ -20,10 +24,13 @@ pub fn finalize_tectonics(
     geology: &mut GeologyLayer,
     noise: &(impl NoiseFn<f64, 3> + Sync),
     config: &TectonicsConfig,
+    logger: Option<&GenerationLogger>,
 ) {
-    let num_cells = topology.cells.len();
+    if let Some(log) = logger {
+        log.start_step("Тектоника: орогенез, поиск океанов и континентальность...");
+    }
 
-    // 1. Накладываем конусы дрейфующих вулканов и структурный горный/детальный шум поверх изостазии
+    // 1. Накладываем искаженные 3D-шумом вулканы, горные хребты и батиметрическую текстуру
     {
         let volcanoes = &geology.volcanoes;
         let orogeny = &geology.orogeny_root;
@@ -37,87 +44,139 @@ pub fn finalize_tectonics(
             .enumerate()
             .for_each(|(i, (elev_out, mask_out))| {
                 let dir = topology.cells[i].center;
-                let d_vec = dir.as_dvec3();
+                let p = dir.as_dvec3() * config.warp_scale;
+                let offsets = &config.warp_offsets;
 
-                // Горный складчатый шум (сильнее там, где высокий orogeny_root)
+                // Domain Warping для неровных склонов гор и рваных очертаний вулканов
+                let wx = noise.get([
+                    p.x + offsets[0][0],
+                    p.y + offsets[0][1],
+                    p.z + offsets[0][2],
+                ]) as f32;
+                let wy = noise.get([
+                    p.x + offsets[1][0],
+                    p.y + offsets[1][1],
+                    p.z + offsets[1][2],
+                ]) as f32;
+                let wz = noise.get([
+                    p.x + offsets[2][0],
+                    p.y + offsets[2][1],
+                    p.z + offsets[2][2],
+                ]) as f32;
+
+                let warped_dir =
+                    (dir + Vec3::new(wx, wy, wz) * config.warp_strength).normalize_or_zero();
+                let w_dvec = warped_dir.as_dvec3();
+
+                // Горный мультифрактальный шум (гребни и долины в зонах орогенеза)
                 let m_scale = config.boundary_noise_scale;
                 let raw_m = noise.get([
-                    d_vec.x * m_scale,
-                    d_vec.y * m_scale,
-                    d_vec.z * m_scale,
+                    w_dvec.x * m_scale,
+                    w_dvec.y * m_scale,
+                    w_dvec.z * m_scale,
                 ]) as f32;
-                let ridge_noise = (1.0 - raw_m.abs()) * config.boundary_noise_amp;
-                let orog_addition = orogeny[i] * ridge_noise * 0.55;
+                let ridge_crest = 1.0 - raw_m.abs();
+                let mtn_mod = (ridge_crest.powf(1.4) - 0.35) * config.boundary_noise_amp;
+                let orog_addition = orogeny[i] * mtn_mod * 0.75;
 
-                // Срединно-океанические хребты (легкая расчлененность в зоне спрединга)
-                let rift_addition = if stress[i] < -0.08 && *elev_out < 0.0 {
-                    (-stress[i]).clamp(0.0, 1.0) * 0.08 * raw_m.abs()
+                // Рельеф срединно-океанических хребтов и трансформных разломов на дне
+                let rift_addition = if stress[i] < -0.05 && *elev_out < 0.0 {
+                    (-stress[i]).clamp(0.0, 1.0) * (ridge_crest - 0.3) * 0.14
                 } else {
                     0.0
                 };
 
-                // Вулканические конусы горячих точек
+                // Искаженные вулканические массивы (без идеальных круглых конусов!)
                 let v_scale = config.volcano_noise_scale;
-                let raw_v = noise.get([
-                    d_vec.x * v_scale,
-                    d_vec.y * v_scale,
-                    d_vec.z * v_scale,
+                let raw_v1 = noise.get([
+                    w_dvec.x * v_scale,
+                    w_dvec.y * v_scale,
+                    w_dvec.z * v_scale,
                 ]) as f32;
-                let v_mod = config.volcano_noise_base + config.volcano_noise_mult * raw_v;
+                let raw_v2 = noise.get([
+                    w_dvec.x * (v_scale * 2.1) + 17.3,
+                    w_dvec.y * (v_scale * 2.1) - 31.1,
+                    w_dvec.z * (v_scale * 2.1) + 9.4,
+                ]) as f32;
+
+                // Искажаем саму точку измерения дистанции до вулкана, чтобы разбить круглое основание
+                let v_warp = (dir
+                    + Vec3::new(wx, wy, wz) * 0.032
+                    + Vec3::new(raw_v1, raw_v2, -raw_v1) * 0.015)
+                    .normalize_or_zero();
 
                 let mut max_volcano_h = 0.0_f32;
                 let mut is_volc = false;
+
                 for v in volcanoes {
-                    let dist = dir.dot(v.center).clamp(-1.0, 1.0).acos();
-                    if dist < v.radius {
-                        let f = 1.0 - (dist / v.radius);
-                        let profile = f.powi(config.volcano_profile_pow);
-                        let local_h = v.height * profile * v_mod;
+                    let dist = v_warp.dot(v.center).clamp(-1.0, 1.0).acos();
+                    // Радиус каждого вулкана «дышит» от угла и 3D-шума (создает отроги и лавовые языки)
+                    let eff_radius =
+                        (v.radius * (0.72 + 0.48 * raw_v1 + 0.25 * raw_v2)).max(0.012);
+
+                    if dist < eff_radius {
+                        let f = (1.0 - dist / eff_radius).clamp(0.0, 1.0);
+                        let profile = smoothstep(f) * f.powi(config.volcano_profile_pow);
+                        let ridges =
+                            0.72 + 0.45 * (1.0 - raw_v2.abs()) + config.volcano_noise_mult * raw_v1;
+                        let local_h = v.height * profile * ridges;
                         if local_h > max_volcano_h {
                             max_volcano_h = local_h;
                         }
-                        if dist < v.radius * 0.68 {
+                        if dist < eff_radius * 0.65 && local_h > 0.04 {
                             is_volc = true;
                         }
                     }
                 }
                 *mask_out = is_volc;
 
-                // Мелкий глобальный шум (шероховатость)
+                // Двухмасштабный детальный шум (крупные холмы/котловины + мелкая шероховатость)
                 let d_scale = config.detail_noise_scale;
-                let detail = noise.get([
-                    d_vec.x * d_scale,
-                    d_vec.y * d_scale,
-                    d_vec.z * d_scale,
+                let detail_macro = noise.get([
+                    w_dvec.x * d_scale,
+                    w_dvec.y * d_scale,
+                    w_dvec.z * d_scale,
                 ]) as f32;
+                let detail_micro = noise.get([
+                    dir.x as f64 * (d_scale * 2.7) + 41.2,
+                    dir.y as f64 * (d_scale * 2.7) - 19.8,
+                    dir.z as f64 * (d_scale * 2.7) + 63.5,
+                ]) as f32;
+                let detail_combined =
+                    (detail_macro * 0.70 + detail_micro * 0.30) * config.detail_noise_amp * 0.68;
 
-                let h = *elev_out
-                    + orog_addition
-                    + rift_addition
-                    + max_volcano_h
-                    + detail * config.detail_noise_amp * 0.35;
+                let h = *elev_out + orog_addition + rift_addition + max_volcano_h + detail_combined;
                 *elev_out = h.max(config.elevation_min_clamp);
             });
     }
 
-    // 2. Легкое сглаживание ступенек сетки
+    // 2. Умеренное сглаживание ступенек сетки (не замыливающее рельеф в стол)
     step_elevation_diffusion(
         topology,
         &mut geology.elevations,
-        config.diffusion_strength * 0.5,
+        config.diffusion_strength * 0.65,
         config.slope_erosion_factor,
         config.diffusion_max_strength,
     );
 
-    // 3. Определяем настоящие океаны (засыпая замкнутые не-океанические провалы) и считаем континентальность
+    // 3. Определяем настоящие океаны и считаем континентальность
     compute_oceans_and_continentality(topology, cache, geology, config);
 
-    // 4. Классифицируем породы (RockType) на основе реальных параметров клетки и маски `is_ocean`
+    if let Some(log) = logger {
+        log.start_step("Тектоника: классификация пород и расчёт рельефности...");
+    }
+
+    // 4. Классифицируем породы (RockType)
     classify_physical_lithology(topology, cache, geology, noise, config);
 
     // 5. Вычисляем рельефность (изрезанность) каждой клетки
     compute_terrain_ruggedness(topology, cache, geology, noise);
-    let _ = num_cells;
+}
+
+#[inline]
+fn smoothstep(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 fn classify_physical_lithology(
@@ -158,19 +217,17 @@ fn classify_physical_lithology(
             let l_noise =
                 noise.get([d.x * 6.5 + 31.7, d.y * 6.5 - 19.3, d.z * 6.5 + 47.1]) as f32;
 
-            // 1. Вулканы горячих точек
             if volcano_mask[i] {
                 *lith_out = if dens >= 2830.0 {
-                    RockType::FloodBasalt // Океанические щитовые вулканы (Гавайи)
+                    RockType::FloodBasalt
                 } else if elev > config.cont_base_height + 0.14 {
-                    RockType::Andesite // Высокие континентальные стратовулканы
+                    RockType::Andesite
                 } else {
-                    RockType::FloodBasalt // Континентальные траппы
+                    RockType::FloodBasalt
                 };
                 return;
             }
 
-            // Масштабонезависимый локальный уклон
             let start = cache.edge_offsets[i];
             let end = cache.edge_offsets[i + 1];
             let mut max_slope = 0.0_f32;
@@ -183,29 +240,20 @@ fn classify_physical_lithology(
                 }
             }
 
-            // 2. Клетки настоящего Океана (`is_ocean == true`)
             if ocean_cell {
                 if elev > -0.095 + l_noise * 0.015 && lat_abs < 0.62 + l_noise * 0.05 {
-                    // Тёплый мелководный карбонатный шельф
                     *lith_out = RockType::Limestone;
                 } else if orog > 0.35 && str_val > 0.05 {
-                    // Подводные склоны островных дуг
                     *lith_out = RockType::Andesite;
                 } else if dens < 2810.0 && sed > 0.6 {
-                    // Затопленный континентальный шельф (пассивная окраина)
                     *lith_out = if sed > 1.4 {
                         RockType::ShaleClay
                     } else {
                         RockType::Sandstone
                     };
-                } else if c_age < 0.32 || (str_val < -0.06 && str_val > -0.5) {
-                    // Молодая океаническая кора вдоль срединно-океанических хребтов
+                } else if c_age < 0.28 || str_val < -0.08 {
                     *lith_out = RockType::OceanicBasalt;
-                } else if elev < config.ocean_base_height - 0.03
-                    || sed > 0.22
-                    || str_val < -0.5
-                {
-                    // Старая абиссальная равнина или глубоководный желоб
+                } else if elev < config.ocean_base_height - 0.02 || sed > 0.22 {
                     *lith_out = RockType::PelagicSediment;
                 } else {
                     *lith_out = RockType::OceanicBasalt;
@@ -213,9 +261,7 @@ fn classify_physical_lithology(
                 return;
             }
 
-            // 3. Суша (включая сухие не-океанические впадины ниже уровня моря)
-            // 3а. Активные континентальные рифты и базальтовые траппы
-            if str_val < -0.08 && str_val > -0.5 && thick < 26.0 {
+            if str_val < -0.08 && thick < 26.0 {
                 *lith_out = if l_noise > -0.20 {
                     RockType::FloodBasalt
                 } else {
@@ -224,22 +270,17 @@ fn classify_physical_lithology(
                 return;
             }
 
-            // 3б. Высокие складчатые пояса и магматические дуги
-            if orog > 0.42 || thick > 44.0 {
-                if str_val > 0.08 && thick < 54.0 && l_noise > -0.15 {
-                    // Вулканическая дуга над субдукцией (Анды / Каскадные горы)
+            if orog > 0.42 || thick > 42.0 {
+                if str_val > 0.08 && thick < 52.0 && l_noise > -0.15 {
                     *lith_out = RockType::Andesite;
-                } else if orog > 0.65 || (thick > 52.0 && l_noise > 0.0) {
-                    // Гранитные батолиты в ядре коллизии
+                } else if orog > 0.65 || (thick > 48.0 && l_noise > 0.0) {
                     *lith_out = RockType::Granite;
                 } else {
-                    // Метаморфический пояс (гнейсы и кристаллические сланцы)
                     *lith_out = RockType::GneissSchist;
                 }
                 return;
             }
 
-            // 3в. Осадочные бассейны, равнины и засыпанные замкнутые низменности
             if sed > 0.85 || (elev < config.cont_base_height * 0.88 && max_slope < 0.016) {
                 if elev < config.cont_base_height * 0.75
                     && max_slope < 0.015
@@ -256,7 +297,6 @@ fn classify_physical_lithology(
                 return;
             }
 
-            // 3г. Древний континентальный кратон (кристаллический щит и платформа)
             if l_noise > 0.42 {
                 *lith_out = RockType::Granite;
             } else if l_noise > -0.05 {
