@@ -4,6 +4,8 @@ pub mod camera_3d;
 pub mod hotkeys;
 pub mod mesh_globe;
 
+use crate::astronomy::{AxialRotation, Orbit, Sun, Sunlight};
+
 use crate::{
     domains::{
         climate::{
@@ -37,13 +39,18 @@ use crate::{
 };
 use bevy::prelude::*;
 use camera_3d::{
-    GlobeInertia, keyboard_zoom, reset_zoom, rotate_globe, set_default_camera_zoom, zoom_camera,
+    SystemInertia, keyboard_zoom, reset_zoom, rotate_system, set_default_camera_zoom, zoom_camera,
 };
 use hotkeys::hotkey_controls;
 use mesh_globe::{build_globe_mesh, build_river_mesh, recolor_globe_mesh, reposition_globe_mesh};
 
+/// Визуальная поверхность планеты.
 #[derive(Component)]
 pub struct Globe;
+/// Корневой объект всей звёздной системы.
+/// Вращение этого объекта поворачивает Солнце, Землю и освещение вместе.
+#[derive(Component)]
+pub struct StarSystemRoot;
 
 /// Режим проекции мира (задел под переключение между 3D-сферой и 2D-картой)
 #[derive(Resource, Default, PartialEq, Eq, Clone, Copy)]
@@ -109,7 +116,7 @@ impl Plugin for ViewportPlugin {
             .add_systems(
                 Update,
                 (
-                    rotate_globe,
+                    rotate_system,
                     zoom_camera,
                     hotkey_controls,
                     keyboard_zoom,
@@ -125,10 +132,25 @@ impl Plugin for ViewportPlugin {
     }
 }
 
-fn setup_scene(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>) {
+fn setup_scene(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
     let material_handle = materials.add(StandardMaterial {
         base_color: Color::WHITE,
         perceptual_roughness: 0.85,
+        ..default()
+    });
+
+    // Геометрия Солнца
+    let sun_mesh = meshes.add(Sphere::new(1.0).mesh().uv(48, 32));
+
+    // Светящаяся поверхность Солнца
+    let sun_material = materials.add(StandardMaterial {
+        base_color: Color::srgb(1.0, 0.55, 0.12),
+        emissive: LinearRgba::rgb(25.0, 10.0, 1.5),
+        unlit: true,
         ..default()
     });
 
@@ -139,33 +161,72 @@ fn setup_scene(mut commands: Commands, mut materials: ResMut<Assets<StandardMate
         ..default()
     });
 
-    // Используем Mesh3d::default() без аллокации временных сфер/пустых мешей в GPU-буфере
-    commands
+    // Общий родитель всей звёздной системы.
+    let system_root = commands
         .spawn((
-            Mesh3d::default(),
-            MeshMaterial3d(material_handle),
-            Globe,
-            GlobeInertia::default(),
-            Visibility::Hidden,
+            StarSystemRoot,
+            SystemInertia::default(),
+            Transform::default(),
+            Visibility::Inherited,
         ))
-        .with_children(|parent| {
-            parent.spawn((
-                Mesh3d::default(),
-                MeshMaterial3d(river_material),
-                RiverOverlayMesh,
-                Visibility::Hidden,
-            ));
-        });
+        .id();
 
-    commands.spawn((
-        DirectionalLight {
-            illuminance: 12000.0,
-            shadow_maps_enabled: true,
-            ..default()
-        },
-        Transform::from_xyz(10.0, 10.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y),
-    ));
+    // Все объекты системы становятся дочерними одного корня.
+    commands.entity(system_root).with_children(|system| {
+        // Солнце в центре системы.
+        system.spawn((
+            Mesh3d(sun_mesh),
+            MeshMaterial3d(sun_material),
+            Sun,
+            Transform::default(),
+            Visibility::Hidden,
+        ));
 
+        // Физическая система координат Земли.
+        // Орбита и осевое вращение рассчитываются независимо
+        // от ручного поворота всей системы.
+        system
+            .spawn((
+                Orbit::earth(),
+                AxialRotation::earth(),
+                Transform::default(),
+                Visibility::Inherited,
+            ))
+            .with_children(|parent| {
+                // Поверхность Земли.
+                parent
+                    .spawn((
+                        Mesh3d::default(),
+                        MeshMaterial3d(material_handle),
+                        Globe,
+                        Transform::default(),
+                        Visibility::Hidden,
+                    ))
+                    .with_children(|globe| {
+                        // Реки остаются дочерним объектом поверхности.
+                        globe.spawn((
+                            Mesh3d::default(),
+                            MeshMaterial3d(river_material),
+                            RiverOverlayMesh,
+                            Visibility::Hidden,
+                        ));
+                    });
+            });
+
+        // Солнечный свет также принадлежит общей системе.
+        system.spawn((
+            DirectionalLight {
+                illuminance: 12000.0,
+                shadow_maps_enabled: true,
+                ..default()
+            },
+            Sunlight,
+            Transform::from_xyz(10.0, 10.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y),
+        ));
+    });
+
+    // Камера остаётся вне системы:
+    // вращение объектов не вращает саму камеру.
     commands.spawn((Camera3d::default(), Transform::from_xyz(0.0, 0.0, 9.5)));
 }
 
@@ -341,15 +402,17 @@ pub fn draw_axis_and_equator_gizmos(
     mut gizmos: Gizmos,
     view_config: Res<ViewportViewConfig>,
     world_config: Res<crate::world::WorldConfig>,
-    globe_query: Query<&Transform, With<Globe>>,
+    globe_query: Query<&GlobalTransform, With<Globe>>,
 ) {
     if !view_config.show_axis_equator {
         return;
     }
 
-    let Ok(globe_transform) = globe_query.single() else {
+    let Ok(global_transform) = globe_query.single() else {
         return;
     };
+
+    let globe_transform = global_transform.compute_transform();
 
     let radius = world_config.radius;
 

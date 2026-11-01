@@ -12,6 +12,30 @@ use crate::domains::{
     tectonics::tectonics_data::GeologyLayer,
 };
 
+/// Оценивает точное количество вершин и индексов поверхности глобуса.
+/// Используется для резервирования памяти без фиксированных многомиллионных capacity.
+fn globe_mesh_sizes(topology: &WorldTopology, elevations: &[f32]) -> (usize, usize) {
+    let mut vertices = 0usize;
+    let mut indices = 0usize;
+
+    for (cell_id, cell) in topology.cells.iter().enumerate() {
+        let corners = cell.corners.len();
+        vertices = vertices.saturating_add(1 + corners);
+        indices = indices.saturating_add(corners.saturating_mul(3));
+
+        let h = elevations[cell_id];
+        let walls = cell
+            .neighbors
+            .iter()
+            .filter(|&&neighbor_id| h > elevations[neighbor_id])
+            .count();
+        vertices = vertices.saturating_add(walls.saturating_mul(4));
+        indices = indices.saturating_add(walls.saturating_mul(6));
+    }
+
+    (vertices, indices)
+}
+
 pub fn build_globe_mesh(
     topology: &WorldTopology,
     elevations: &[f32],
@@ -19,10 +43,11 @@ pub fn build_globe_mesh(
     cell_colors: &[[f32; 4]],
     radius: f32,
 ) -> Mesh {
-    let mut positions: Vec<[f32; 3]> = Vec::new();
-    let mut normals: Vec<[f32; 3]> = Vec::new();
-    let mut colors: Vec<[f32; 4]> = Vec::new();
-    let mut indices: Vec<u32> = Vec::new();
+    let (vertex_capacity, index_capacity) = globe_mesh_sizes(topology, elevations);
+    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(vertex_capacity);
+    let mut normals: Vec<[f32; 3]> = Vec::with_capacity(vertex_capacity);
+    let mut colors: Vec<[f32; 4]> = Vec::with_capacity(vertex_capacity);
+    let mut indices: Vec<u32> = Vec::with_capacity(index_capacity);
 
     for (cell_id, cell) in topology.cells.iter().enumerate() {
         let real_h = elevations[cell_id];
@@ -121,8 +146,8 @@ pub fn recolor_globe_mesh(
     elevations: &[f32],
     cell_colors: &[[f32; 4]],
 ) -> Vec<[f32; 4]> {
-    // Резервируем память сразу, чтобы избежать фризов от реаллокации
-    let mut colors: Vec<[f32; 4]> = Vec::with_capacity(3_200_000);
+    let (vertex_capacity, _) = globe_mesh_sizes(topology, elevations);
+    let mut colors: Vec<[f32; 4]> = Vec::with_capacity(vertex_capacity);
 
     for (cell_id, cell) in topology.cells.iter().enumerate() {
         let h = elevations[cell_id];
@@ -165,7 +190,8 @@ pub fn reposition_globe_mesh(
     flatten_water: bool,     // Выравнивать ли воду
     radius: f32,
 ) -> Vec<[f32; 3]> {
-    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(3_200_000);
+    let (vertex_capacity, _) = globe_mesh_sizes(topology, real_elevations);
+    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(vertex_capacity);
 
     for (cell_id, cell) in topology.cells.iter().enumerate() {
         let real_h = real_elevations[cell_id];

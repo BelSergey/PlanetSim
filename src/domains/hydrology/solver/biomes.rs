@@ -46,14 +46,14 @@ pub(super) fn compute_biomes(
         // 2. Океанические биомы (с естественной кромкой морского льда)
         if elev <= 0.0 {
             let ice_jitter = noise.temp_jitter[i] * 0.8;
-            hydrology.biomes[i] =
-                if mean_temp + ice_jitter < -4.5 || warm_temp + ice_jitter < -1.0 {
-                    Biome::SeaIce
-                } else if elev > -0.09 {
-                    Biome::ShallowOcean
-                } else {
-                    Biome::DeepOcean
-                };
+            hydrology.biomes[i] = if mean_temp + ice_jitter < -4.5 || warm_temp + ice_jitter < -1.0
+            {
+                Biome::SeaIce
+            } else if elev > -0.09 {
+                Biome::ShallowOcean
+            } else {
+                Biome::DeepOcean
+            };
             continue;
         }
 

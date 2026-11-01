@@ -36,7 +36,9 @@ pub fn generate_plates(rng: &mut impl RngExt, config: &TectonicsConfig) -> Vec<P
         };
 
         let mut best_dir = Vec3::Y;
-        let mut best_dist = -1.0;
+        // Для выбора наиболее удаленного кандидата достаточно минимизировать
+        // максимальный dot product с уже размещенными плитами: acos здесь не нужен.
+        let mut best_max_dot = f32::INFINITY;
 
         // 2. Равномерно распределяем центры плит по сфере
         for _ in 0..config.plate_dir_iterations {
@@ -45,17 +47,15 @@ pub fn generate_plates(rng: &mut impl RngExt, config: &TectonicsConfig) -> Vec<P
             let r = (1.0 - z * z).sqrt();
             let candidate = Vec3::new(r * lon.cos(), z, r * lon.sin());
 
-            let min_dist = plates
+            // Максимальная угловая дистанция получается при минимальном
+            // максимальном dot product с уже размещенными плитами.
+            let max_dot = plates
                 .iter()
-                .map(|p: &Plate| {
-                    let dot_product = candidate.dot(p.center_dir);
-                    let clamped_dot = dot_product.clamp(-1.0, 1.0);
-                    clamped_dot.acos()
-                })
-                .fold(f32::MAX, f32::min);
+                .map(|plate: &Plate| candidate.dot(plate.center_dir))
+                .fold(-1.0_f32, f32::max);
 
-            if min_dist > best_dist {
-                best_dist = min_dist;
+            if max_dot < best_max_dot {
+                best_max_dot = max_dot;
                 best_dir = candidate;
             }
         }
@@ -101,6 +101,9 @@ pub fn simulate_tectonics(
 
     let plates = &geology.plates;
     let volcanoes = &geology.volcanoes;
+    // Радиус горячей точки не меняется во время прохода по клеткам.
+    // Кэшируем cos(radius), чтобы не вычислять cos для каждой пары «клетка-вулкан».
+    let volcano_cos_radii: Vec<f32> = volcanoes.iter().map(|v| v.radius.cos()).collect();
     let mut ridge_cells = vec![false; num_cells];
 
     for (cell_id, cell) in topology.cells.iter().enumerate() {
@@ -241,11 +244,19 @@ pub fn simulate_tectonics(
         let raw_v_noise = noise.get(v_coords) as f32;
         let v_noise_mod = config.volcano_noise_base + config.volcano_noise_mult * raw_v_noise;
 
-        for v in volcanoes {
+        for (v, &cos_radius) in volcanoes.iter().zip(&volcano_cos_radii) {
             let dot_prod = warped_dir.dot(v.center).clamp(-1.0, 1.0);
-            let d = dot_prod.acos();
 
-            if d < v.radius {
+            // Для обычного углового радиуса [0, PI] проверка через заранее
+            // вычисленный cos позволяет пропустить acos для точек вне вулкана.
+            let inside = if (0.0..=PI).contains(&v.radius) {
+                dot_prod > cos_radius
+            } else {
+                dot_prod.acos() < v.radius
+            };
+
+            if inside {
+                let d = dot_prod.acos();
                 let f = 1.0 - (d / v.radius);
                 let profile = f.powi(config.volcano_profile_pow);
                 let local_h = v.height * profile * v_noise_mod;
@@ -546,36 +557,57 @@ fn apply_lithology_overlays(
 
 /// Находит ровно 3 ближайшие плиты к данной точке.
 fn find_closest_plates(dir: Vec3, plates: &[Plate]) -> (usize, usize, usize, f32, f32, f32) {
-    let mut dist_1 = f32::MAX;
-    let mut dist_2 = f32::MAX;
-    let mut dist_3 = f32::MAX;
+    // acos монотонно убывает: сортируем по dot product, не вычисляя угол
+    // для каждой плиты. Углы нужны только для трёх выбранных результатов.
+    let mut dot_1 = f32::NEG_INFINITY;
+    let mut dot_2 = f32::NEG_INFINITY;
+    let mut dot_3 = f32::NEG_INFINITY;
 
     let mut p1_idx = 0;
     let mut p2_idx = 0;
     let mut p3_idx = 0;
 
     for (i, plate) in plates.iter().enumerate() {
-        let dot_prod = dir.dot(plate.center_dir).clamp(-1.0, 1.0);
-        let d = dot_prod.acos();
+        let dot = dir.dot(plate.center_dir).clamp(-1.0, 1.0);
 
-        if d < dist_1 {
-            dist_3 = dist_2;
+        if dot > dot_1 {
+            dot_3 = dot_2;
             p3_idx = p2_idx;
-            dist_2 = dist_1;
+            dot_2 = dot_1;
             p2_idx = p1_idx;
-            dist_1 = d;
+            dot_1 = dot;
             p1_idx = i;
-        } else if d < dist_2 {
-            dist_3 = dist_2;
+        } else if dot > dot_2 {
+            dot_3 = dot_2;
             p3_idx = p2_idx;
-            dist_2 = d;
+            dot_2 = dot;
             p2_idx = i;
-        } else if d < dist_3 {
-            dist_3 = d;
+        } else if dot > dot_3 {
+            dot_3 = dot;
             p3_idx = i;
         }
     }
-    (p1_idx, p2_idx, p3_idx, dist_1, dist_2, dist_3)
+
+    (
+        p1_idx,
+        p2_idx,
+        p3_idx,
+        if dot_1.is_finite() {
+            dot_1.clamp(-1.0, 1.0).acos()
+        } else {
+            f32::MAX
+        },
+        if dot_2.is_finite() {
+            dot_2.clamp(-1.0, 1.0).acos()
+        } else {
+            f32::MAX
+        },
+        if dot_3.is_finite() {
+            dot_3.clamp(-1.0, 1.0).acos()
+        } else {
+            f32::MAX
+        },
+    )
 }
 
 /// Вычисляет плавный переход высот между равнинами и океанами (шельфы, побережья)
@@ -691,20 +723,18 @@ pub fn step_elevation_diffusion(
         if cell.neighbors.is_empty() {
             continue;
         }
-        let neighbor_sum: f32 = cell
-            .neighbors
-            .iter()
-            .map(|&n_id| old_elevations[n_id])
-            .sum();
-        let avg_neighbor = neighbor_sum / cell.neighbors.len() as f32;
-
+        // Сумму высот и максимальный уклон можно получить за один обход соседей.
+        let mut neighbor_sum = 0.0_f32;
         let mut max_slope = 0.0_f32;
+        let current_elevation = old_elevations[i];
+
         for &n_id in &cell.neighbors {
-            let diff = (old_elevations[i] - old_elevations[n_id]).abs();
-            if diff > max_slope {
-                max_slope = diff;
-            }
+            let neighbor_elevation = old_elevations[n_id];
+            neighbor_sum += neighbor_elevation;
+            max_slope = max_slope.max((current_elevation - neighbor_elevation).abs());
         }
+
+        let avg_neighbor = neighbor_sum / cell.neighbors.len() as f32;
 
         let local_strength = (strength + max_slope * slope_erosion_factor).min(max_strength);
 
@@ -769,14 +799,14 @@ pub fn generate_hotspots(
             continue;
         }
 
-        let mut best_dist = f32::MAX;
+        // acos монотонно убывает: ближайшая плита имеет максимальный dot product.
+        let mut best_dot = f32::NEG_INFINITY;
         let mut plate_idx = 0;
 
         for (i, plate) in plates.iter().enumerate() {
-            let dot_prod = plume_pos.dot(plate.center_dir).clamp(-1.0, 1.0);
-            let d = dot_prod.acos();
-            if d < best_dist {
-                best_dist = d;
+            let dot_prod = plume_pos.dot(plate.center_dir);
+            if dot_prod > best_dot {
+                best_dot = dot_prod;
                 plate_idx = i;
             }
         }

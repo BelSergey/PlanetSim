@@ -106,7 +106,7 @@ impl Default for ClimateConfig {
             heat_advection_strength: 0.75,
             equilibrium_iterations: 4,
 
-            axial_tilt: 0.50,
+            axial_tilt: 23.439281_f32.to_radians(),
             active_season: ClimateSeason::Spring,
 
             ocean_continentality_scale: 0.35,

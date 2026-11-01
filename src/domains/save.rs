@@ -384,8 +384,7 @@ pub fn spawn_save_load_task(
         } => {
             let clean_name = sanitize_filename(&name);
             let do_climate = include_climate && !climate.temperatures.is_empty();
-            let do_hydrology =
-                include_climate && include_hydrology && !hydrology.biomes.is_empty();
+            let do_hydrology = include_climate && include_hydrology && !hydrology.biomes.is_empty();
 
             let total_steps = 2 + usize::from(do_climate) + usize::from(do_hydrology);
             let logger = SaveLoadLogger::new(total_steps);
@@ -797,7 +796,9 @@ pub fn draw_save_load_windows_system(
                 ui.horizontal(|ui| {
                     ui.heading("Доступные планеты");
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.add_enabled(!is_busy, egui::Button::new("🔄 Обновить")).clicked()
+                        if ui
+                            .add_enabled(!is_busy, egui::Button::new("🔄 Обновить"))
+                            .clicked()
                         {
                             save_ui.refresh_lists();
                         }
@@ -826,10 +827,7 @@ pub fn draw_save_load_windows_system(
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
                                             ui.add_enabled_ui(!is_busy, |ui| {
-                                                if ui
-                                                    .button("🗑")
-                                                    .on_hover_text("Удалить")
-                                                    .clicked()
+                                                if ui.button("🗑").on_hover_text("Удалить").clicked()
                                                 {
                                                     let _ = fs::remove_file(&entry.path);
                                                     save_ui.refresh_lists();
