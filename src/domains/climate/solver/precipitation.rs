@@ -3,7 +3,7 @@
 use rayon::prelude::*;
 
 use super::{
-    super::{climate_config::ClimateConfig, climate_data::{SeasonalSnapshot,WaterKind}},
+    super::{climate_config::ClimateConfig, climate_data::SeasonalSnapshot},
     SeasonScratch, SolverPrecalc,
 };
 use crate::{domains::tectonics::tectonics_data::GeologyLayer, world::topology::WorldTopology};
@@ -12,7 +12,6 @@ use crate::{domains::tectonics::tectonics_data::GeologyLayer, world::topology::W
 pub(super) fn compute_season_precipitation(
     topology: &WorldTopology,
     geology: &GeologyLayer,
-    water_kind: &[WaterKind],
     config: &ClimateConfig,
     precalc: &SolverPrecalc,
     surface_wetness: &[f32],
@@ -42,7 +41,6 @@ pub(super) fn compute_season_precipitation(
     let rh_arr = &snap.humidity;
     let pressures = &snap.pressure;
     let winds_3d = &snap.winds_3d;
-    let temps = &snap.temperatures; 
 
     let cloud_source = &mut scratch.prev_humidity;
 
@@ -80,13 +78,14 @@ pub(super) fn compute_season_precipitation(
                         let n_elev = elevs[n_id].max(0.0);
                         let dh = (my_elev - n_elev).max(0.0);
 
-                        let is_land = water_kind[i] == WaterKind::Land;
+                        let is_land = !geology.is_ocean_cell(i);
                         let coastal_step = if is_land {
-                            match water_kind[n_id] {
-                                WaterKind::Ocean => 0.05,
-                                WaterKind::Lake  => 0.015,
-                                WaterKind::Land  => 0.0,
+                            if geology.is_ocean_cell(n_id) {
+                                0.05
+                            } else {
+                                0.0
                             }
+                                //WaterKind::Lake  => 0.015,
                         } else {
                             0.0
                         };
@@ -104,19 +103,19 @@ pub(super) fn compute_season_precipitation(
 
             // --- МЕХАНИЗМ 1b: Lake-effect (снег/дождь с прогретого озера на холодный берег) ---
             let mut lake_effect = 0.0;
-            if water_kind[i] == WaterKind::Land && sp > 1e-5 && w_sum > 0.0 {
+            if !geology.is_ocean_cell(i) && sp > 1e-5 && w_sum > 0.0 {
                 let start = offs[i];
                 let end = offs[i + 1];
                 for j in start..end {
                     let w = w_air[j];
                     if w > 0.0 {
-                        let n_id = neighbors[j - start];
-                        if water_kind[n_id] == WaterKind::Lake {
-                            // Классический зимний lake-effect: озеро сильно теплее подветренной суши
-                            // (Великие озёра, Байкал). Летом dt ≈ 0, механизм не выстреливает.
-                            let dt = (temps[n_id] - temps[i]).max(0.0);
-                            lake_effect += w * (dt * 0.045).min(0.85);
-                        }
+                        // let n_id = neighbors[j - start];
+                        // if water_kind[n_id] == WaterKind::Lake {
+                        //     // Классический зимний lake-effect: озеро сильно теплее подветренной суши
+                        //     // (Великие озёра, Байкал). Летом dt ≈ 0, механизм не выстреливает.
+                        //     let dt = (temps[n_id] - temps[i]).max(0.0);
+                        //     lake_effect += w * (dt * 0.045).min(0.85);
+                        // }
                     }
                 }
                 lake_effect /= w_sum;
@@ -151,17 +150,17 @@ pub(super) fn compute_season_precipitation(
             let conv_lift = convergence * 1.30 * inversion_suppression;
 
             let dynamic_lift = cyclone_lift + conv_lift;
-            let surface_factor = match water_kind[i] {
-                WaterKind::Ocean => 0.75,
-                WaterKind::Lake => {
-                    // Малый источник влаги — между океаном и влажной сушей.
-                    let eff_wet = surface_wetness[i].max(0.35);
-                    0.72 + 0.20 * eff_wet
-                }
-                WaterKind::Land => {
-                    let eff_wet = surface_wetness[i].max(0.20);
-                    0.75 + 0.55 * eff_wet * recycling
-                }
+            let surface_factor = if geology.is_ocean_cell(i) {
+                    0.75
+            } else {
+
+                // WaterKind::Lake => {
+                //     // Малый источник влаги — между океаном и влажной сушей.
+                //     let eff_wet = surface_wetness[i].max(0.35);
+                //     0.72 + 0.20 * eff_wet
+                // }
+                let eff_wet = surface_wetness[i].max(0.20);
+                0.75 + 0.55 * eff_wet * recycling
             };
 
             let syn_clouds = avail_water * rh_factor * dynamic_lift * 1.30 * surface_factor;
@@ -239,7 +238,7 @@ pub(super) fn compute_season_precipitation(
         let norm_precip = (1.0 - (-raw_p * 2.20).exp()).clamp(0.0, 1.0);
         snap.precipitation[i] = norm_precip;
 
-        if elevs[i] > 0.0 {
+        if !geology.is_ocean_cell(i) {
             let local_boost = (norm_precip * 0.05 + surface_wetness[i] * 0.05) * recycling;
             snap.humidity[i] = (snap.humidity[i] + local_boost).clamp(0.0, 1.0);
         }

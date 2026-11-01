@@ -1,14 +1,19 @@
 // src/domains/tectonics/mod.rs
 
+pub mod solver;
 mod tectonics_config;
 pub mod tectonics_data;
 pub mod tectonics_palettes;
-mod tectonics_solver;
 pub mod tectonics_ui;
 
+#[allow(unused_imports)]
+pub use solver::{
+    finalize_tectonics, generate_hotspots, generate_plates, generate_plumes, init_tectonics,
+    simulate_tectonics, step_elevation_diffusion, step_tectonics, step_tectonics_realtime,
+    TectonicsGeometryCache, TectonicsScratch,
+};
 pub use tectonics_config::TectonicsConfig;
 pub use tectonics_data::GeologyLayer;
-pub use tectonics_solver::{generate_hotspots, generate_plates, simulate_tectonics};
 
 use bevy::prelude::*;
 

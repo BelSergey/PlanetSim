@@ -26,13 +26,15 @@ const LAYERS: &[(MapOverlay, &str)] = &[
     (MapOverlay::SpaceView, "Базовый"),
     (MapOverlay::Elevation, "Рельеф"),
     (MapOverlay::TectonicPlates, "Тектонические плиты"),
+    (MapOverlay::Continentality, "Континентальность"),
     (MapOverlay::Lithology, "Породы"),
     (MapOverlay::Ruggedness, "Рельефность"),
+    (MapOverlay::CrustAge, "Возраст коры"),
+    (MapOverlay::TectonicStress, "Напряжение границ"),
     (MapOverlay::Temperature, "Температура"),
     (MapOverlay::Humidity, "Влажность"),
     (MapOverlay::Precipitation, "Осадки"),
     (MapOverlay::Albedo, "Альбедо"),
-    (MapOverlay::Continentality, "Континентальность"),
     (MapOverlay::Pressure, "Давление"),
     (MapOverlay::Winds, "Ветра"),
     (MapOverlay::Soils, "Почвы"),
@@ -52,19 +54,19 @@ const LAYERS: &[(MapOverlay, &str)] = &[
 
 #[derive(Resource, Clone, Copy, Debug)]
 pub struct ShellLayout {
-    pub top:    egui::Rect,
+    pub top: egui::Rect,
     pub bottom: egui::Rect,
-    pub left:   egui::Rect,
-    pub right:  egui::Rect,
+    pub left: egui::Rect,
+    pub right: egui::Rect,
 }
 
 impl Default for ShellLayout {
     fn default() -> Self {
         Self {
-            top:    egui::Rect::ZERO,
+            top: egui::Rect::ZERO,
             bottom: egui::Rect::ZERO,
-            left:   egui::Rect::ZERO,
-            right:  egui::Rect::ZERO,
+            left: egui::Rect::ZERO,
+            right: egui::Rect::ZERO,
         }
     }
 }
@@ -86,10 +88,10 @@ pub fn render_ui_shell(world: &mut World) -> Result {
             ui.set_min_size(rect.size());
             ui.set_max_size(rect.size());
 
-            layout.top    = draw_top_panel(ui, world);
+            layout.top = draw_top_panel(ui, world);
             layout.bottom = draw_bottom_panel(ui, world);
-            layout.left   = draw_left_panel(ui, world);
-            layout.right  = draw_right_panel(ui, world);
+            layout.left = draw_left_panel(ui, world);
+            layout.right = draw_right_panel(ui, world);
         });
 
     // Публикуем реальные размеры панелей на этот кадр.

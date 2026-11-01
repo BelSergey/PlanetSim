@@ -7,7 +7,10 @@ pub mod palettes;
 
 use crate::{
     domains::{
-        civilization::{CivilizationConfig, CivilizationLayer, SocLayerKind, civ_palettes::build_civ_layer_colors},
+        civilization::{
+            CivilizationConfig, CivilizationLayer, SocLayerKind,
+            civ_palettes::build_civ_layer_colors,
+        },
         climate::{
             climate_data::ClimateLayer,
             climate_palettes::{
@@ -28,7 +31,7 @@ use crate::{
             tectonics_data::GeologyLayer,
             tectonics_palettes::{
                 build_elevation_colors, build_lithology_colors, build_plate_colors,
-                build_ruggedness_colors,
+                build_ruggedness_colors, build_crust_age_colors, build_tectonic_stress_colors,
             },
         },
     },
@@ -40,7 +43,8 @@ use crate::{
 };
 use bevy::prelude::*;
 use camera_3d::{
-    GlobeInertia, keyboard_zoom, reset_zoom, globe_drag_input, globe_apply_inertia, set_default_camera_zoom, zoom_camera,
+    GlobeInertia, globe_apply_inertia, globe_drag_input, keyboard_zoom, reset_zoom,
+    set_default_camera_zoom, zoom_camera,
 };
 use hotkeys::hotkey_controls;
 use mesh_globe::{build_globe_mesh, build_river_mesh, recolor_globe_mesh, reposition_globe_mesh};
@@ -64,12 +68,15 @@ pub enum MapOverlay {
     SpaceView,
     Elevation,
     TectonicPlates,
+    Continentality,
     Lithology,
+    Ruggedness,
+    CrustAge,
+    TectonicStress,
     Temperature,
     Humidity,
     Precipitation,
     Albedo,
-    Continentality,
     Pressure,
     Winds,
     Soils,
@@ -78,7 +85,6 @@ pub enum MapOverlay {
     FoodPotential,
     Minerals,
     BioResources,
-    Ruggedness,
     CivSpecies,
     CivKinship,
     CivCulture,
@@ -126,7 +132,7 @@ impl Plugin for ViewportPlugin {
             .add_systems(
                 Update,
                 (
-                    globe_drag_input, 
+                    globe_drag_input,
                     globe_apply_inertia,
                     zoom_camera,
                     hotkey_controls,
@@ -241,10 +247,12 @@ fn sync_viewport_mesh(
         let flatten_water = view_config.flat_water;
 
         if pipeline.rebuild_mesh {
-            let colors = compute_overlay_colors(&overlay, &geology, &climate, &hydrology, &civ, &civ_config);
+            let colors =
+                compute_overlay_colors(&overlay, &geology, &climate, &hydrology, &civ, &civ_config);
             let new_mesh = build_globe_mesh(
                 &topology,
                 &geology.elevations,
+                &geology.is_ocean,
                 flatten_water,
                 &colors,
                 world_config.radius,
@@ -257,6 +265,7 @@ fn sync_viewport_mesh(
                 let new_positions = reposition_globe_mesh(
                     &topology,
                     &geology.elevations,
+                    &geology.is_ocean,
                     flatten_water,
                     world_config.radius,
                     height_scale,
@@ -265,7 +274,14 @@ fn sync_viewport_mesh(
             }
 
             if pipeline.recolor_mesh {
-                let colors = compute_overlay_colors(&overlay, &geology, &climate, &hydrology, &civ, &civ_config);
+                let colors = compute_overlay_colors(
+                    &overlay,
+                    &geology,
+                    &climate,
+                    &hydrology,
+                    &civ,
+                    &civ_config,
+                );
                 let vertex_colors = recolor_globe_mesh(&topology, &geology.elevations, &colors);
                 mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, vertex_colors);
             }
@@ -300,20 +316,22 @@ fn compute_overlay_colors(
     geology: &GeologyLayer,
     climate: &ClimateLayer,
     hydrology: &HydrologyLayer,
-    civ: &CivilizationLayer, 
+    civ: &CivilizationLayer,
     civ_config: &CivilizationConfig,
 ) -> Vec<[f32; 4]> {
     match *overlay {
         MapOverlay::SpaceView => build_space_colors(geology, climate, hydrology),
         MapOverlay::Elevation => build_elevation_colors(geology),
         MapOverlay::TectonicPlates => build_plate_colors(geology),
+        MapOverlay::Continentality => build_continentality_colors(climate),
         MapOverlay::Lithology => build_lithology_colors(geology),
         MapOverlay::Ruggedness => build_ruggedness_colors(geology),
+        MapOverlay::CrustAge => build_crust_age_colors(geology),
+        MapOverlay::TectonicStress => build_tectonic_stress_colors(geology),
         MapOverlay::Temperature => build_temperature_colors(climate),
         MapOverlay::Humidity => build_humidity_colors(climate),
         MapOverlay::Precipitation => build_precipitation_colors(climate),
         MapOverlay::Albedo => build_albedo_colors(climate),
-        MapOverlay::Continentality => build_continentality_colors(climate),
         MapOverlay::Pressure => build_pressure_colors(climate),
         MapOverlay::Winds => build_wind_colors(climate),
         MapOverlay::Soils => build_soil_colors(hydrology),

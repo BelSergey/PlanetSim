@@ -3,7 +3,7 @@
 use super::SurfaceNoise;
 use crate::{
     domains::{
-        climate::climate_data::{ClimateLayer, WaterKind},
+        climate::climate_data::ClimateLayer,
         hydrology::{
             hydrology_config::HydrologyConfig,
             hydrology_data::{HydrologyLayer, SoilType},

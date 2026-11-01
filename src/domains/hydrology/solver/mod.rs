@@ -15,7 +15,7 @@ use super::{
 };
 use crate::{
     domains::{
-        climate::{ClimateConfig, climate_data::{ClimateLayer, WaterKind}},
+        climate::{ClimateConfig, climate_data::ClimateLayer},
         tectonics::tectonics_data::GeologyLayer,
     },
     world::topology::WorldTopology,

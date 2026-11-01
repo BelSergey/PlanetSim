@@ -28,8 +28,10 @@ pub fn build_space_colors(
         .map(|(i, &h)| {
             let albedo = climate.albedo[i];
             let biome = hydrology.biomes.get(i).copied().unwrap_or(Biome::DeepOcean);
+            // Проверяем, настоящий ли это океан (а не просто сухая впадина ниже 0)
+            let is_ocean = geology.is_ocean.get(i).copied().unwrap_or(h <= 0.0);
 
-            let (base_r, base_g, base_b, base_albedo) = if h <= 0.0 {
+            let (base_r, base_g, base_b, base_albedo) = if is_ocean {
                 if biome == Biome::SeaIce {
                     (0.88, 0.94, 0.99, 0.75)
                 } else {

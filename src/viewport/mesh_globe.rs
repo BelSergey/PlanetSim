@@ -15,6 +15,7 @@ use crate::domains::{
 pub fn build_globe_mesh(
     topology: &WorldTopology,
     elevations: &[f32],
+    is_ocean: &[bool],
     flatten_water: bool,
     cell_colors: &[[f32; 4]],
     radius: f32,
@@ -27,7 +28,8 @@ pub fn build_globe_mesh(
 
     for (cell_id, cell) in topology.cells.iter().enumerate() {
         let real_h = elevations[cell_id];
-        let render_h = if flatten_water {
+        let cell_ocean = is_ocean.get(cell_id).copied().unwrap_or(real_h <= 0.0);
+        let render_h = if flatten_water && cell_ocean {
             real_h.max(0.0)
         } else {
             real_h
@@ -65,7 +67,11 @@ pub fn build_globe_mesh(
             let real_neighbor_h = elevations[neighbor_id];
 
             if real_h > real_neighbor_h {
-                let render_neighbor_h = if flatten_water {
+                let nbr_ocean = is_ocean
+                    .get(neighbor_id)
+                    .copied()
+                    .unwrap_or(real_neighbor_h <= 0.0);
+                let render_neighbor_h = if flatten_water && nbr_ocean {
                     real_neighbor_h.max(0.0)
                 } else {
                     real_neighbor_h
@@ -162,8 +168,9 @@ pub fn recolor_globe_mesh(
 
 pub fn reposition_globe_mesh(
     topology: &WorldTopology,
-    real_elevations: &[f32], // Реальные высоты (нужны, чтобы условие стен совпало!)
-    flatten_water: bool,     // Выравнивать ли воду
+    real_elevations: &[f32],
+    is_ocean: &[bool],
+    flatten_water: bool,
     radius: f32,
     height_scale: f32,
 ) -> Vec<[f32; 3]> {
@@ -171,7 +178,8 @@ pub fn reposition_globe_mesh(
 
     for (cell_id, cell) in topology.cells.iter().enumerate() {
         let real_h = real_elevations[cell_id];
-        let render_h = if flatten_water {
+        let cell_ocean = is_ocean.get(cell_id).copied().unwrap_or(real_h <= 0.0);
+        let render_h = if flatten_water && cell_ocean {
             real_h.max(0.0)
         } else {
             real_h
@@ -190,8 +198,12 @@ pub fn reposition_globe_mesh(
             let neighbor_id = cell.neighbors[k];
             let real_neighbor_h = real_elevations[neighbor_id];
 
-            if real_h > real_neighbor_h {
-                let render_neighbor_h = if flatten_water {
+           if real_h > real_neighbor_h {
+                let nbr_ocean = is_ocean
+                    .get(neighbor_id)
+                    .copied()
+                    .unwrap_or(real_neighbor_h <= 0.0);
+                let render_neighbor_h = if flatten_water && nbr_ocean {
                     real_neighbor_h.max(0.0)
                 } else {
                     real_neighbor_h
@@ -266,7 +278,8 @@ pub fn build_river_mesh(
     for (cell_id, cell) in topology.cells.iter().enumerate() {
         let real_h = elevations[cell_id];
         let my_flow = flows[cell_id];
-        if real_h <= 0.0 || my_flow < threshold {
+        let cell_is_ocean = geology.is_ocean.get(cell_id).copied().unwrap_or(real_h <= 0.0);
+        if cell_is_ocean || my_flow < threshold {
             continue;
         }
         let Some(out_k_u8) = flow_dirs[cell_id] else {
@@ -278,7 +291,7 @@ pub fn build_river_mesh(
             continue;
         }
 
-        let render_h = if flatten_water {
+        let render_h = if flatten_water && cell_is_ocean {
             real_h.max(0.0)
         } else {
             real_h
@@ -300,7 +313,8 @@ pub fn build_river_mesh(
         // Собираем все входящие притоки (соседей, которые текут в нашу клетку и превышают порог)
         inlets.clear();
         for (k, &nbr_id) in cell.neighbors.iter().enumerate() {
-            if k == out_k || elevations[nbr_id] <= 0.0 || flows[nbr_id] < threshold {
+            let nbr_is_ocean = geology.is_ocean.get(nbr_id).copied().unwrap_or(elevations[nbr_id] <= 0.0);
+            if k == out_k || nbr_is_ocean || flows[nbr_id] < threshold {
                 continue;
             }
             if let Some(nbr_out_k) = flow_dirs[nbr_id] {
@@ -411,8 +425,13 @@ pub fn build_river_mesh(
         // --- ВОДОПАД НА УСТУПЕ ГЕКСА (если текущая клетка выше соседа) ---
         let out_nbr_id = cell.neighbors[out_k];
         let real_nbr_h = elevations[out_nbr_id];
+        let out_nbr_ocean = geology
+            .is_ocean
+            .get(out_nbr_id)
+            .copied()
+            .unwrap_or(real_nbr_h <= 0.0);
         if real_h > real_nbr_h {
-            let render_nbr_h = if flatten_water {
+            let render_nbr_h = if flatten_water && out_nbr_ocean {
                 real_nbr_h.max(0.0)
             } else {
                 real_nbr_h

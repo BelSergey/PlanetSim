@@ -3,7 +3,7 @@
 use bevy::prelude::*;
 use rayon::prelude::*;
 
-use super::super::{climate_config::ClimateConfig, climate_data::{SeasonalSnapshot, WaterKind}};
+use super::super::{climate_config::ClimateConfig, climate_data::SeasonalSnapshot};
 use super::{SeasonScratch, SolverPrecalc, smoothstep};
 use crate::{domains::tectonics::tectonics_data::GeologyLayer, world::topology::WorldTopology};
 
@@ -144,12 +144,7 @@ pub(super) fn compute_season_pressure_and_winds(
             let elev_diff = n_elev - my_elev;
 
             if elev_diff > 0.0 {
-                // 1. Вертикальный масштаб: конвертируем абстрактные единицы высоты в физические
-                // Если пик 0.5 — это ~8 км, то коэффициент ~0.016.
-                // (Подберите 0.01 - 0.03, чтобы горы выглядели физически реально в ветрах)
                 let vertical_scale = 0.02;
-
-                // 2. Физический склон: высота / горизонтальная дистанция в тех же единицах (радианах)
                 let real_height_diff = elev_diff * vertical_scale;
                 let slope = (real_height_diff / avg_hex_rad).clamp(0.0, 2.0);
 
@@ -181,8 +176,8 @@ pub(super) fn compute_season_pressure_and_winds(
 
 pub(super) fn compute_ocean_currents(
     topology: &WorldTopology,
+    geology: &GeologyLayer,
     continentality: &[f32],
-    water_kind: &[WaterKind],
     config: &ClimateConfig,
     precalc: &SolverPrecalc,
     scratch: &mut SeasonScratch,
@@ -194,27 +189,19 @@ pub(super) fn compute_ocean_currents(
     let tdirs = &precalc.tangent_dirs_flat;
 
     for i in 0..num_cells {
-        let wk = water_kind[i];
-        if wk == WaterKind::Land {
+        if !geology.is_ocean_cell(i) {
             snap.ocean_currents[i] = Vec3::ZERO;
             continue;
         }
-        let is_lake = wk == WaterKind::Lake;
 
         let cell = &topology.cells[i];
         let pos = cell.center;
 
         // 1. Ветровое течение
-        let wind_mult = if is_lake {
-            config.ocean_current_speed_multiplier * 0.25
-        } else {
-            config.ocean_current_speed_multiplier
-        };
-        let mut wind_current = snap.winds_3d[i] * wind_mult;
+        let mut wind_current = snap.winds_3d[i] * config.ocean_current_speed_multiplier;
 
-        let freeze_threshold = if is_lake { 1.5 } else { 0.0 };
-        if snap.temperatures[i] <= freeze_threshold {
-            wind_current *= if is_lake { 0.02 } else { 0.1 };
+        if snap.temperatures[i] <= 0.0 {
+            wind_current *= 0.1;
         }
 
         // 2. Спираль Экмана (Rodrigues)
@@ -226,9 +213,7 @@ pub(super) fn compute_ocean_currents(
         );
 
         // 3. Геострофическое течение (угол ±π/2 → cos=0, sin=±1, только cross)
-                let geostrophic_current = if is_lake {
-            Vec3::ZERO
-        } else {
+        let geostrophic_current = {
             let my_p = snap.pressure[i];
             let mut grad_p = Vec3::ZERO;
             let start = offs[i];
@@ -236,7 +221,7 @@ pub(super) fn compute_ocean_currents(
             for (j, tdir) in tdirs.iter().enumerate().take(end).skip(start) {
                 let k = j - start;
                 let n_id = cell.neighbors[k];
-                if water_kind[n_id] == WaterKind::Ocean {
+                if geology.is_ocean_cell(n_id) {
                     let n_pos = topology.cells[n_id].center;
                     let raw_dir = n_pos - pos;
                     let safe_dist = raw_dir.length().max(avg_hex_rad * 0.3);
@@ -252,49 +237,41 @@ pub(super) fn compute_ocean_currents(
             grad_p.cross(pos) * sign * config.geostrophic_multiplier
         };
 
-        // --- Смешение: озеро почти целиком ветровое ---
-        let mut current_3d = if is_lake {
-            wind_current * 0.95 + geostrophic_current * 0.05
-        } else {
-            wind_current * 0.4 + geostrophic_current * 0.6
-        };
+        let mut current_3d = wind_current * 0.4 + geostrophic_current * 0.6;
 
-        // 4. Граничные течения
-        if !is_lake {
-            let start = offs[i];
-            let end = offs[i + 1];
-            let mut coast_normal = Vec3::ZERO;
-            for j in start..end {
-                let k = j - start;
-                let n_id = cell.neighbors[k];
-                if water_kind[n_id] == WaterKind::Land {
-                    let raw_dir = pos - topology.cells[n_id].center;
-                    let tangent_from_coast =
-                        (raw_dir - pos * raw_dir.dot(pos)).normalize_or_zero();
-                    coast_normal += tangent_from_coast;
-                }
+        // 4. Граничные течения вдоль берегов материков
+        let start = offs[i];
+        let end = offs[i + 1];
+        let mut coast_normal = Vec3::ZERO;
+        for j in start..end {
+            let k = j - start;
+            let n_id = cell.neighbors[k];
+            if !geology.is_ocean_cell(n_id) {
+                let raw_dir = pos - topology.cells[n_id].center;
+                let tangent_from_coast = (raw_dir - pos * raw_dir.dot(pos)).normalize_or_zero();
+                coast_normal += tangent_from_coast;
             }
-            let orig_speed = current_3d.length();
-            if coast_normal.length_squared() > 1e-6 && orig_speed > 1e-5 {
-                coast_normal = coast_normal.normalize();
-                let into_coast = current_3d.dot(-coast_normal);
-                if into_coast > 0.0 {
-                    let mut along_coast = current_3d + coast_normal * into_coast;
-                    if along_coast.length_squared() > 1e-8 {
-                        along_coast = along_coast.normalize() * orig_speed;
-                    }
-                    let east = precalc.east[i];
-                    let western_alignment = (-coast_normal).dot(east);
-                    let boost = config.boundary_current_multiplier
-                        * (1.0 + 1.5 * smoothstep((western_alignment + 0.5) / 1.0));
-                    current_3d = along_coast * boost;
+        }
+
+        let orig_speed = current_3d.length();
+        if coast_normal.length_squared() > 1e-6 && orig_speed > 1e-5 {
+            coast_normal = coast_normal.normalize();
+            let into_coast = current_3d.dot(-coast_normal);
+            if into_coast > 0.0 {
+                let mut along_coast = current_3d + coast_normal * into_coast;
+                if along_coast.length_squared() > 1e-8 {
+                    along_coast = along_coast.normalize() * orig_speed;
                 }
-            } else {
-                let coastal_proximity =
-                    (1.0 - continentality[i].abs() * 3.0).clamp(0.0, 1.0);
-                current_3d *=
-                    1.0 + (config.boundary_current_multiplier - 1.0) * 0.35 * coastal_proximity;
+                let east = precalc.east[i];
+                let western_alignment = (-coast_normal).dot(east);
+                let boost = config.boundary_current_multiplier
+                    * (1.0 + 1.5 * smoothstep((western_alignment + 0.5) / 1.0));
+                current_3d = along_coast * boost;
             }
+        } else {
+            let coastal_proximity = (1.0 - continentality[i].abs() * 3.0).clamp(0.0, 1.0);
+            current_3d *=
+                1.0 + (config.boundary_current_multiplier - 1.0) * 0.35 * coastal_proximity;
         }
 
         snap.ocean_currents[i] = current_3d;
@@ -306,7 +283,7 @@ pub(super) fn compute_ocean_currents(
         let prev = &scratch.prev_currents;
         let out = &mut snap.ocean_currents;
         out.par_iter_mut().enumerate().for_each(|(i, o)| {
-            if water_kind[i] == WaterKind::Land {
+            if !geology.is_ocean_cell(i) {
                 *o = Vec3::ZERO;
                 return;
             }
@@ -318,7 +295,7 @@ pub(super) fn compute_ocean_currents(
             let mut sum = Vec3::ZERO;
             let mut cnt = 0.0_f32;
             for &n in nbrs {
-                if water_kind[n] == WaterKind::Land {
+                if !geology.is_ocean_cell(n) {
                     sum += prev[i];
                 } else {
                     sum += prev[n];

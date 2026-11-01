@@ -7,7 +7,7 @@ pub mod climate_ui;
 mod solver;
 
 pub use climate_config::ClimateConfig;
-pub use climate_data::{ClimateLayer, WaterKind};
+pub use climate_data::ClimateLayer;
 pub use solver::simulate_all_seasons;
 
 use crate::world::{pipeline::PipelineSet, states::AppState};

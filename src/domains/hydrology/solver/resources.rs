@@ -8,7 +8,7 @@ use super::super::{
 };
 use crate::{
     domains::{
-        climate::climate_data::{ClimateLayer, WaterKind},
+        climate::climate_data::ClimateLayer,
         tectonics::tectonics_data::{GeologyLayer, RockType},
     },
     world::topology::WorldTopology,

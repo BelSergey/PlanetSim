@@ -39,18 +39,6 @@ impl SeasonalSnapshot {
     }
 }
 
-/// Тип водной поверхности клетки.
-/// Определяется один раз в `compute_continentality` и используется всеми солверами.
-#[derive(Clone, Copy, PartialEq, Eq, Default, Debug, Serialize, Deserialize)]
-pub enum WaterKind {
-    #[default]
-    Land,
-    /// Замкнутый/мелкий водоём: море, озеро, лагуна, Байкал, Великие озёра.
-    Lake,
-    /// Крупный связанный океан (> min_ocean_size_ratio от планеты).
-    Ocean,
-}
-
 #[derive(Resource, Default, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ClimateLayer {
@@ -83,13 +71,6 @@ pub struct ClimateLayer {
     /// Заполняется hydrology-solver'ом в apply_surface_feedback_to_climate.
     pub surface_heat_capacity: Vec<f32>,
 
-    /// Классификация водной поверхности (Land / Lake / Ocean). Заполняется continentality-solver'ом.
-    #[serde(default)]
-    pub water_kind: Vec<WaterKind>,
-    /// Размер озера в клетках (0 для Land/Ocean). Используется для масштабирования инерции/испарения.
-    #[serde(default)]
-    pub lake_size: Vec<u32>,
-
     // Предрассчитанные снимки трех сезонов для биомов, рек и мгновенного переключения в UI
     pub spring: SeasonalSnapshot,
     pub summer: SeasonalSnapshot,
@@ -113,9 +94,6 @@ impl ClimateLayer {
         self.ocean_currents.resize(num_cells, Vec3::ZERO);
 
         self.surface_heat_capacity.resize(num_cells, 0.35); // дефолт суши
-
-        self.water_kind.resize(num_cells, WaterKind::Land);
-        self.lake_size.resize(num_cells, 0);
 
         self.spring.resize(num_cells);
         self.summer.resize(num_cells);
