@@ -73,13 +73,21 @@ pub(super) fn compute_runoff(
 
         let whc = hydrology.water_capacity[i];
         let pet = ((mean_temp + 10.0).max(0.5) * 0.016 * config.aridity_evap_scale).max(0.02);
-        let aridity_index = (pet / annual_precip.max(1e-4)) * (0.55 + 0.65 * whc);
 
+        // В настоящих пустынях (где осадки ничтожны по сравнению с испаряемостью PET)
+        // вся дождевая вода мгновенно уходит в песок и испаряется — поверхностный сток равен 0.0!
+        if annual_precip < 0.045 && snowmelt_bonus < 0.01 {
+            hydrology.runoff[i] = 0.0;
+            continue;
+        }
+
+        let aridity_index = (pet / annual_precip.max(1e-4)) * (0.55 + 0.65 * whc);
         let aet_ratio = aridity_index / (1.0 + aridity_index * aridity_index).sqrt();
-        let net_rain_runoff = annual_precip * (1.0 - aet_ratio).clamp(0.05, 0.95);
+        // Убрали нижний порог 0.05! При высоком aridity_index сток плавно падает в чистый 0.0
+        let runoff_fraction = ((1.0 - aet_ratio) - 0.12).clamp(0.0, 0.90);
+        let net_rain_runoff = annual_precip * runoff_fraction;
 
         let karst_loss = geology.lithology[i].karst_permeability() * 0.25;
-
         let raw_runoff = (net_rain_runoff + snowmelt_bonus) * (1.0 - karst_loss);
         hydrology.runoff[i] = (raw_runoff * config.runoff_multiplier).max(0.0);
     }

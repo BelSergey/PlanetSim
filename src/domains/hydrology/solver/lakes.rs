@@ -37,11 +37,8 @@ impl PartialOrd for FloodNode {
     }
 }
 
-/// Результаты расчёта котловин и озёр для передачи в трассировщик рек
 pub(super) struct LakeRoutingData {
-    /// Клетки-приёмники бессточных котловин (куда стекают реки во 2-м проходе наравне с океаном)
     pub endorheic_sinks: Vec<bool>,
-    /// Испарение с поверхности клеточного зеркала для проточных озёр (вычитается из транзитного стока)
     pub lake_cell_evap_loss: Vec<f32>,
 }
 
@@ -65,10 +62,7 @@ pub(super) fn compute_lakes_and_basins(
         };
     }
 
-    // =========================================================================
-    // 1. ПРОХОД 1 (Priority-Flood по чистому рельефу от Океана):
-    // Находим все топографические впадины (где уровень перелива sill_elev выше дна)
-    // =========================================================================
+    // 1. ПРОХОД 1 (Priority-Flood от Океана)
     let mut visited = vec![false; num_cells];
     let mut sill_elev = vec![0.0_f32; num_cells];
     let mut pass1_dir: Vec<Option<u8>> = vec![None; num_cells];
@@ -87,7 +81,6 @@ pub(super) fn compute_lakes_and_basins(
         }
     }
 
-    // Фоллбэк для полностью сухопутной планеты без океанов
     if heap.is_empty() {
         if let Some((min_id, &min_h)) = geology
             .elevations
@@ -105,7 +98,7 @@ pub(super) fn compute_lakes_and_basins(
         }
     }
 
-    let min_depth = config.min_lake_depth.max(0.0005);
+    let min_depth = config.min_lake_depth.max(0.002);
 
     while let Some(FloodNode { cell_id: u, .. }) = heap.pop() {
         if !geology.is_ocean_cell(u) {
@@ -128,7 +121,6 @@ pub(super) fn compute_lakes_and_basins(
 
                 let v_raw = geology.elevations[v];
                 if v_raw + min_depth < u_sill {
-                    // Клетка `v` лежит ниже уровня перелива `u_sill` — это чаша потенциального озера!
                     sill_elev[v] = u_sill;
                     basin_outlet[v] = if u_basin != usize::MAX { u_basin } else { u };
                 } else {
@@ -144,9 +136,7 @@ pub(super) fn compute_lakes_and_basins(
         }
     }
 
-    // =========================================================================
-    // 2. СЧИТАЕМ СУММАРНЫЙ ПРИТОК ВОДЫ В КАЖДУЮ ВПАДИНУ
-    // =========================================================================
+    // 2. СЧИТАЕМ ПРИТОК ВОДЫ В КАЖДУЮ КОТЛОВИНУ
     let mut pass1_flow = vec![0.0_f32; num_cells];
     for i in 0..num_cells {
         if !geology.is_ocean_cell(i) {
@@ -164,7 +154,6 @@ pub(super) fn compute_lakes_and_basins(
         }
     }
 
-    // Группируем ячейки впадин по их точке перелива `outlet`
     let mut basins: HashMap<usize, Vec<usize>> = HashMap::new();
     for i in 0..num_cells {
         let outlet = basin_outlet[i];
@@ -173,15 +162,18 @@ pub(super) fn compute_lakes_and_basins(
         }
     }
 
-    // =========================================================================
-    // 3. ВОДНЫЙ БАЛАНС КОТЛОВИН: ПРОТОЧНЫЕ ПРЕСНЫЕ И БЕССТОЧНЫЕ СОЛЁНЫЕ ОЗЁРА
-    // =========================================================================
+    // Максимальный размер одного озера (~0.35% клеток планеты), чтобы не затапливать материки
+    let max_fresh_lake_cells = ((num_cells as f32 * 0.0022) as usize).clamp(4, 180);
+    let max_salt_lake_cells = ((num_cells as f32 * 0.0038) as usize).clamp(6, 320);
+    // Порог эрозионного прорыва (реки прорезают мелкие неровности рельефа глубиной < 0.024)
+    let river_incision_depth = (config.min_lake_depth * 9.5).max(0.022);
+
+    // 3. ВОДНЫЙ БАЛАНС И ЭРОЗИОННЫЙ ПРОРЫВ ПОРОГОВ (SILL BREACHING)
     for (outlet, mut b_cells) in basins {
         if b_cells.is_empty() {
             continue;
         }
 
-        // Весь приток бассейна впадины проходит через корневые клетки впадины, впадающие прямо в `outlet`
         let mut total_inflow = 0.0_f32;
         for &c in &b_cells {
             if let Some(k) = pass1_dir[c] {
@@ -191,12 +183,26 @@ pub(super) fn compute_lakes_and_basins(
             }
         }
 
-        // Сортируем клетки чаши от самого глубокого дна вверх к кромке перелива
         b_cells.sort_by(|&a, &b| geology.elevations[a].total_cmp(&geology.elevations[b]));
         let deepest_cell = b_cells[0];
+        let bottom_elev = geology.elevations[deepest_cell];
         let rim_sill_elev = sill_elev[deepest_cell];
+        let max_basin_depth = rim_sill_elev - bottom_elev;
 
-        // Оцениваем испарение каждой клетки, если она станет открытым водным зеркалом озера
+        // Если впадина мелкая (обычная волна шума на равнине), река прорезает порог и спускает её целиком!
+        if max_basin_depth < river_incision_depth && bottom_elev > -0.005 {
+            continue;
+        }
+
+        // Если в котловину почти не течет вода (меньше порога ручья), озеро не образуется вообще!
+        if total_inflow < config.river_threshold * 1.15 {
+            // В совсем сухой глубокой замкнутой яме ставим точку сухого стока (солончак)
+            if max_basin_depth >= river_incision_depth * 1.5 && total_inflow < 1e-6 {
+                endorheic_sinks[deepest_cell] = true;
+            }
+            continue;
+        }
+
         let mut cell_evap = Vec::with_capacity(b_cells.len());
         let mut full_basin_evap = 0.0_f32;
 
@@ -210,52 +216,58 @@ pub(super) fn compute_lakes_and_basins(
                 + climate.winter.precipitation[c])
                 * 0.25;
 
-            let pet_lake = ((t_mean + 11.0).max(0.8)
-                * 0.020
+            let pet_lake = ((t_mean + 12.0).max(1.0)
+                * 0.025
                 * config.aridity_evap_scale
                 * config.lake_evaporation_scale)
-                .max(0.012);
-            // Чистые потери с зеркала озера (испарение минус прямые дожди на воду)
-            let net_loss = (pet_lake - p_annual * 0.85).max(pet_lake * 0.16) * cell_area;
+                .max(0.018);
+            let net_loss = (pet_lake - p_annual * 0.75).max(pet_lake * 0.25) * cell_area;
             cell_evap.push(net_loss);
             full_basin_evap += net_loss;
         }
 
-        if total_inflow >= full_basin_evap && total_inflow >= config.river_threshold * 0.28 {
-            // СЛУЧАЙ А: ПРОТОЧНОЕ ПРЕСНОЕ ОЗЕРО (Exorheic, тип Байкала / Великих озёр / Виктории)
-            // Впадина заполняется до самого порога перелива `rim_sill_elev` и сбрасывает избыток рекой!
-            let lake_len = b_cells.len() as u32;
-            for (idx, &c) in b_cells.iter().enumerate() {
-                hydrology.lake_mask[c] = true;
-                hydrology.is_salt_lake[c] = false;
-                hydrology.lake_depth[c] = (rim_sill_elev - geology.elevations[c]).max(min_depth);
-                hydrology.lake_size[c] = lake_len;
-                lake_cell_evap_loss[c] = cell_evap[idx];
+        if total_inflow >= full_basin_evap {
+            // СЛУЧАЙ А: ПРОТОЧНОЕ ПРЕСНОЕ ОЗЕРО (вытекающая река прорезает порог перелива на глубину incision,
+            // поэтому озеро заполняет только глубокое ядро долины!)
+            let incised_sill = rim_sill_elev - (max_basin_depth * 0.62).min(river_incision_depth * 1.6);
+            let flooded_cells: Vec<usize> = b_cells
+                .iter()
+                .copied()
+                .filter(|&c| geology.elevations[c] < incised_sill)
+                .take(max_fresh_lake_cells)
+                .collect();
 
-                // Озёрные донные отложения (пресноводный сапропель и ил)
-                hydrology.soils[c] = SoilType::Gleysol;
-                hydrology.soil_texture[c] = [0.15, 0.45, 0.40];
-                hydrology.water_capacity[c] = 1.0;
-                hydrology.permeability[c] = 0.01;
+            if flooded_cells.len() >= 2 {
+                let lake_len = flooded_cells.len() as u32;
+                let water_level = geology.elevations[*flooded_cells.last().unwrap()];
+                for (idx, &c) in flooded_cells.iter().enumerate() {
+                    hydrology.lake_mask[c] = true;
+                    hydrology.is_salt_lake[c] = false;
+                    hydrology.lake_depth[c] = (water_level - geology.elevations[c]).max(min_depth);
+                    hydrology.lake_size[c] = lake_len;
+                    lake_cell_evap_loss[c] = cell_evap[idx];
+
+                    hydrology.soils[c] = SoilType::Gleysol;
+                    hydrology.soil_texture[c] = [0.15, 0.45, 0.40];
+                    hydrology.water_capacity[c] = 1.0;
+                    hydrology.permeability[c] = 0.01;
+                }
             }
         } else {
-            // СЛУЧАЙ Б: БЕССТОЧНАЯ КОТЛОВИНА (Endorheic, тип Каспия / Арала / Балхаша / Такла-Макан)
-            // Воды НЕ хватает, чтобы перелиться через `outlet`! Заливаем только самые глубокие клетки на дне.
+            // СЛУЧАЙ Б: БЕССТОЧНОЕ СОЛЁНОЕ ОЗЕРО (заливает только ту площадь дна, которую может прокормить приток!)
             let mut accum_evap = 0.0_f32;
             let mut flooded_count = 0usize;
 
-            if total_inflow >= config.river_threshold * 0.35 {
-                for &loss in &cell_evap {
-                    if accum_evap + loss <= total_inflow * 1.25 || flooded_count == 0 {
-                        accum_evap += loss;
-                        flooded_count += 1;
-                    } else {
-                        break;
-                    }
+            for &loss in &cell_evap {
+                if accum_evap + loss <= total_inflow && flooded_count < max_salt_lake_cells {
+                    accum_evap += loss;
+                    flooded_count += 1;
+                } else {
+                    break;
                 }
             }
 
-            if flooded_count > 0 {
+            if flooded_count >= 2 {
                 let water_level = geology.elevations[b_cells[flooded_count - 1]];
                 let lake_len = flooded_count as u32;
                 for &c in &b_cells[..flooded_count] {
@@ -272,7 +284,7 @@ pub(super) fn compute_lakes_and_basins(
                     hydrology.permeability[c] = 0.01;
                 }
             } else {
-                // Сухая бессточная впадина в пустыне (солончак / такыр): вода испаряется на дне
+                // Приток слишком мал для озера — оставляем сухое дно впадины (солончак)
                 endorheic_sinks[deepest_cell] = true;
             }
         }
