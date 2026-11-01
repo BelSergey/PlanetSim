@@ -122,8 +122,8 @@ impl Default for TectonicsConfig {
     fn default() -> Self {
         Self {
             num_plates: 15,
-            continental_ratio: 0.42,
-            pure_oceanic_plate_fraction: 0.16,
+            continental_ratio: 0.38,
+            pure_oceanic_plate_fraction: 0.28,
             craton_eccentricity: 0.85,
             plate_base_height_variance: 0.035,
             plate_dir_iterations: 18,
@@ -166,12 +166,12 @@ impl Default for TectonicsConfig {
             slope_erosion_factor: 2.2,
             diffusion_max_strength: 0.35,
 
-            hotspot_count: 18,
-            hotspot_spacing_rad: 0.042,
+            hotspot_count: 12,
+            hotspot_spacing_rad: 0.048,
             hotspot_height_min: 0.26,
             hotspot_height_max: 0.72,
             hotspot_radius_base: 0.045,
-            hotspot_radius_growth: 0.025,
+            hotspot_radius_growth: 0.035,
             volcano_erosion_rate: 0.32,
             volcano_profile_pow: 2,
             volcano_radius_per_height: 0.045,

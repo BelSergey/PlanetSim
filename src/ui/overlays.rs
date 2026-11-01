@@ -89,7 +89,7 @@ pub fn generation_progress_overlay(
         (egui::Align2::CENTER_TOP, [0.0, 42.0])
     };
 
-    let content_width = 440.0;
+    let content_width = 540.0;
 
     egui::Window::new("generation_status")
         .title_bar(false)
@@ -133,7 +133,7 @@ pub fn generation_progress_overlay(
             ui.add_space(2.0);
 
             egui::ScrollArea::vertical()
-                .max_height(340.0)
+                .max_height(680.0)
                 .auto_shrink([false, true])
                 .stick_to_bottom(true)
                 .show(ui, |ui| {

@@ -7,6 +7,7 @@ use crate::{
 };
 use bevy::math::Quat;
 use rayon::prelude::*;
+use std::f32::consts::PI;
 
 pub fn advect_crust_and_plates(
     topology: &WorldTopology,
@@ -16,7 +17,9 @@ pub fn advect_crust_and_plates(
     config: &TectonicsConfig,
     dt: f32,
 ) {
-    // 1. Непрерывно вращаем плиты, их кратоны и накопленный кватернион ориентации
+    let num_plates = geology.plates.len();
+
+    // 1. Вращаем плиты, их кратоны и накопленный кватернион ориентации
     for plate in &mut geology.plates {
         let angle = plate.angular_vel * dt;
         let rot = Quat::from_axis_angle(plate.euler_pole, angle);
@@ -25,7 +28,27 @@ pub fn advect_crust_and_plates(
         plate.accum_rot = (rot * plate.accum_rot).normalize();
     }
 
-    // 2. Двигаем существующие вулканы вместе с их плитой и плавно состариваем их
+    // 1б. Мягкая релаксация центров Вороного, чтобы плиты сохраняли площадь
+    if num_plates >= 2 {
+        let min_sep = (4.0 * PI / num_plates as f32).sqrt() * 0.52;
+        for i in 0..num_plates {
+            for j in (i + 1)..num_plates {
+                let ci = geology.plates[i].center_dir;
+                let cj = geology.plates[j].center_dir;
+                let dot = ci.dot(cj).clamp(-1.0, 1.0);
+                let dist = dot.acos();
+                if dist > 1e-4 && dist < min_sep {
+                    let push = (min_sep - dist) * 0.25;
+                    let dir_ij = (cj - ci * dot).normalize_or_zero();
+                    let dir_ji = (ci - cj * dot).normalize_or_zero();
+                    geology.plates[i].center_dir = (ci - dir_ij * push).normalize_or_zero();
+                    geology.plates[j].center_dir = (cj - dir_ji * push).normalize_or_zero();
+                }
+            }
+        }
+    }
+
+    // 2. Двигаем вулканы вместе с плитой и переводим эрозию ВЫСОТЫ в ШИРИНУ острова!
     for v in &mut geology.volcanoes {
         if let Some(plate) = geology.plates.get(v.plate_id) {
             let angle = plate.angular_vel * dt;
@@ -33,15 +56,19 @@ pub fn advect_crust_and_plates(
             v.center = (rot * v.center).normalize_or_zero();
         }
         v.age += dt;
-        // Старые вулканы постепенно оседают и эродируют, превращаясь в низкие атоллы и гайоты
-        let decay = (1.0 - config.volcano_erosion_rate * dt * 1.35).clamp(0.80, 0.995);
-        v.height *= decay;
-        v.radius = (v.radius + config.hotspot_radius_growth * dt * 0.15).min(0.11);
-    }
-    geology.volcanoes.retain(|v| v.height > 0.035);
 
-    // 3. Плавная полулагранжева адвекция накопленной складчатости (orogeny_root) и осадков (sediment)
-    // без дискретного скачка plate_id, чтобы исключить полосатую гребёнку
+        // Потерянная от эрозии и оседания высота (dh) расплывается в стороны, увеличивая радиус острова!
+        let old_h = v.height;
+        let decay = (1.0 - config.volcano_erosion_rate * dt * 0.85).clamp(0.85, 0.995);
+        v.height = old_h * decay;
+        let lost_h = (old_h - v.height).max(0.0);
+
+        // Конвертация потерянной высоты в ширину (закон сохранения объема конуса + расползание щита)
+        v.radius = (v.radius + lost_h * 0.28 + config.hotspot_radius_growth * dt * 0.20).min(0.16);
+    }
+    geology.volcanoes.retain(|v| v.height > 0.045);
+
+    // 3. Полулагранжева адвекция накопленной складчатости (orogeny_root) и осадков (sediment)
     {
         let plates = &geology.plates;
         let plate_ids = &geology.plate_ids;

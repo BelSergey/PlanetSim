@@ -30,7 +30,6 @@ pub fn finalize_tectonics(
         log.start_step("Тектоника: орогенез, поиск океанов и континентальность...");
     }
 
-    // 1. Накладываем искаженные 3D-шумом вулканы, горные хребты и батиметрическую текстуру
     {
         let volcanoes = &geology.volcanoes;
         let orogeny = &geology.orogeny_root;
@@ -47,7 +46,6 @@ pub fn finalize_tectonics(
                 let p = dir.as_dvec3() * config.warp_scale;
                 let offsets = &config.warp_offsets;
 
-                // Domain Warping для неровных склонов гор и рваных очертаний вулканов
                 let wx = noise.get([
                     p.x + offsets[0][0],
                     p.y + offsets[0][1],
@@ -68,25 +66,31 @@ pub fn finalize_tectonics(
                     (dir + Vec3::new(wx, wy, wz) * config.warp_strength).normalize_or_zero();
                 let w_dvec = warped_dir.as_dvec3();
 
-                // Горный мультифрактальный шум (гребни и долины в зонах орогенеза)
+                // Мультифрактальный горный шум (работает только в зонах реального орогенеза)
                 let m_scale = config.boundary_noise_scale;
-                let raw_m = noise.get([
+                let raw_m1 = noise.get([
                     w_dvec.x * m_scale,
                     w_dvec.y * m_scale,
                     w_dvec.z * m_scale,
                 ]) as f32;
-                let ridge_crest = 1.0 - raw_m.abs();
-                let mtn_mod = (ridge_crest.powf(1.4) - 0.35) * config.boundary_noise_amp;
+                let raw_m2 = noise.get([
+                    w_dvec.x * (m_scale * 2.1) + 19.3,
+                    w_dvec.y * (m_scale * 2.1) - 27.8,
+                    w_dvec.z * (m_scale * 2.1) + 11.4,
+                ]) as f32;
+                let ridge_crest = (1.0 - raw_m1.abs()) * (0.65 + 0.35 * (1.0 - raw_m2.abs()));
+                let mtn_mod = (ridge_crest.powf(1.25) - 0.25) * config.boundary_noise_amp;
                 let orog_addition = orogeny[i] * mtn_mod * 0.75;
 
-                // Рельеф срединно-океанических хребтов и трансформных разломов на дне
-                let rift_addition = if stress[i] < -0.05 && *elev_out < 0.0 {
-                    (-stress[i]).clamp(0.0, 1.0) * (ridge_crest - 0.3) * 0.14
+                // На спрединге в океане добавляем только мелкую поперечную шероховатость,
+                // строго не поднимая хребет выше -0.06 (никаких островов от спрединга!)
+                let rift_addition = if stress[i] < -0.05 && *elev_out < -0.08 {
+                    (-stress[i]).clamp(0.0, 1.0) * (raw_m2 * 0.04)
                 } else {
                     0.0
                 };
 
-                // Искаженные вулканические массивы (без идеальных круглых конусов!)
+                // Щитовые вулканические острова и стратовулканы горячих точек
                 let v_scale = config.volcano_noise_scale;
                 let raw_v1 = noise.get([
                     w_dvec.x * v_scale,
@@ -94,43 +98,54 @@ pub fn finalize_tectonics(
                     w_dvec.z * v_scale,
                 ]) as f32;
                 let raw_v2 = noise.get([
-                    w_dvec.x * (v_scale * 2.1) + 17.3,
-                    w_dvec.y * (v_scale * 2.1) - 31.1,
-                    w_dvec.z * (v_scale * 2.1) + 9.4,
+                    w_dvec.x * (v_scale * 1.9) + 17.3,
+                    w_dvec.y * (v_scale * 1.9) - 31.1,
+                    w_dvec.z * (v_scale * 1.9) + 9.4,
                 ]) as f32;
 
-                // Искажаем саму точку измерения дистанции до вулкана, чтобы разбить круглое основание
                 let v_warp = (dir
-                    + Vec3::new(wx, wy, wz) * 0.032
-                    + Vec3::new(raw_v1, raw_v2, -raw_v1) * 0.015)
+                    + Vec3::new(wx, wy, wz) * 0.028
+                    + Vec3::new(raw_v1, raw_v2, -raw_v1) * 0.014)
                     .normalize_or_zero();
 
-                let mut max_volcano_h = 0.0_f32;
+                let base_h = *elev_out;
+                let mut best_volcano_target = base_h;
                 let mut is_volc = false;
 
                 for v in volcanoes {
                     let dist = v_warp.dot(v.center).clamp(-1.0, 1.0).acos();
-                    // Радиус каждого вулкана «дышит» от угла и 3D-шума (создает отроги и лавовые языки)
                     let eff_radius =
-                        (v.radius * (0.72 + 0.48 * raw_v1 + 0.25 * raw_v2)).max(0.012);
+                        (v.radius * (0.80 + 0.40 * raw_v1 + 0.22 * raw_v2)).max(0.018);
 
                     if dist < eff_radius {
-                        let f = (1.0 - dist / eff_radius).clamp(0.0, 1.0);
-                        let profile = smoothstep(f) * f.powi(config.volcano_profile_pow);
-                        let ridges =
-                            0.72 + 0.45 * (1.0 - raw_v2.abs()) + config.volcano_noise_mult * raw_v1;
-                        let local_h = v.height * profile * ridges;
-                        if local_h > max_volcano_h {
-                            max_volcano_h = local_h;
+                        let r_norm = (dist / eff_radius).clamp(0.0, 1.0);
+                        let age_flatten = (v.age * 1.8).clamp(0.0, 0.65);
+                        let dome = (1.0 - r_norm * r_norm).max(0.0);
+                        let shoulder = smoothstep(1.0 - r_norm);
+                        let cone_shape = dome * (0.45 + 0.55 * age_flatten)
+                            + shoulder.powi(2) * (0.55 - 0.55 * age_flatten);
+
+                        let ridges = 0.78
+                            + 0.32 * (1.0 - raw_v2.abs())
+                            + config.volcano_noise_mult * raw_v1;
+
+                        let volcano_target_h = if base_h < 0.0 {
+                            let island_pedestal = base_h * (1.0 - shoulder * 0.88);
+                            island_pedestal + v.height * 0.52 * cone_shape * ridges
+                        } else {
+                            base_h + v.height * 0.65 * cone_shape * ridges
+                        };
+
+                        if volcano_target_h > best_volcano_target {
+                            best_volcano_target = volcano_target_h;
                         }
-                        if dist < eff_radius * 0.65 && local_h > 0.04 {
+                        if r_norm < 0.48 && volcano_target_h > 0.02 {
                             is_volc = true;
                         }
                     }
                 }
                 *mask_out = is_volc;
 
-                // Двухмасштабный детальный шум (крупные холмы/котловины + мелкая шероховатость)
                 let d_scale = config.detail_noise_scale;
                 let detail_macro = noise.get([
                     w_dvec.x * d_scale,
@@ -142,34 +157,34 @@ pub fn finalize_tectonics(
                     dir.y as f64 * (d_scale * 2.7) - 19.8,
                     dir.z as f64 * (d_scale * 2.7) + 63.5,
                 ]) as f32;
-                let detail_combined =
-                    (detail_macro * 0.70 + detail_micro * 0.30) * config.detail_noise_amp * 0.68;
+                let raw_detail = detail_macro * 0.70 + detail_micro * 0.30;
 
-                let h = *elev_out + orog_addition + rift_addition + max_volcano_h + detail_combined;
+                let detail_combined = if best_volcano_target > 0.0 && orogeny[i] < 0.25 {
+                    (raw_detail.max(-0.25) + 0.05) * config.detail_noise_amp * 0.28
+                } else {
+                    raw_detail * config.detail_noise_amp * 0.42
+                };
+
+                let h = best_volcano_target + orog_addition + rift_addition + detail_combined;
                 *elev_out = h.max(config.elevation_min_clamp);
             });
     }
 
-    // 2. Умеренное сглаживание ступенек сетки (не замыливающее рельеф в стол)
     step_elevation_diffusion(
         topology,
         &mut geology.elevations,
-        config.diffusion_strength * 0.65,
+        config.diffusion_strength * 0.40,
         config.slope_erosion_factor,
         config.diffusion_max_strength,
     );
 
-    // 3. Определяем настоящие океаны и считаем континентальность
     compute_oceans_and_continentality(topology, cache, geology, config);
 
     if let Some(log) = logger {
         log.start_step("Тектоника: классификация пород и расчёт рельефности...");
     }
 
-    // 4. Классифицируем породы (RockType)
     classify_physical_lithology(topology, cache, geology, noise, config);
-
-    // 5. Вычисляем рельефность (изрезанность) каждой клетки
     compute_terrain_ruggedness(topology, cache, geology, noise);
 }
 
