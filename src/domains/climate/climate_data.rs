@@ -161,38 +161,34 @@ impl ClimateLayer {
 
         self.temperatures
             .par_iter_mut()
+            .zip(self.humidity.par_iter_mut())
+            .zip(self.precipitation.par_iter_mut())
+            .zip(self.albedo.par_iter_mut())
+            .zip(self.pressure.par_iter_mut())
+            .zip(self.winds.par_iter_mut())
+            .zip(self.winds_3d.par_iter_mut())
+            .zip(self.ocean_currents.par_iter_mut())
             .enumerate()
-            .for_each(|(i, v)| *v = snap_a.temperatures[i] * inv_t + snap_b.temperatures[i] * t);
-        self.humidity
-            .par_iter_mut()
-            .enumerate()
-            .for_each(|(i, v)| *v = snap_a.humidity[i] * inv_t + snap_b.humidity[i] * t);
-        self.precipitation
-            .par_iter_mut()
-            .enumerate()
-            .for_each(|(i, v)| *v = snap_a.precipitation[i] * inv_t + snap_b.precipitation[i] * t);
-        self.albedo
-            .par_iter_mut()
-            .enumerate()
-            .for_each(|(i, v)| *v = snap_a.albedo[i] * inv_t + snap_b.albedo[i] * t);
-        self.pressure
-            .par_iter_mut()
-            .enumerate()
-            .for_each(|(i, v)| *v = snap_a.pressure[i] * inv_t + snap_b.pressure[i] * t);
-        self.winds
-            .par_iter_mut()
-            .enumerate()
-            .for_each(|(i, v)| *v = snap_a.winds[i] * inv_t + snap_b.winds[i] * t);
-        self.winds_3d
-            .par_iter_mut()
-            .enumerate()
-            .for_each(|(i, v)| *v = snap_a.winds_3d[i] * inv_t + snap_b.winds_3d[i] * t);
-        self.ocean_currents
-            .par_iter_mut()
-            .enumerate()
-            .for_each(|(i, v)| {
-                *v = snap_a.ocean_currents[i] * inv_t + snap_b.ocean_currents[i] * t
-            });
+            .for_each(
+                |(i, (((((((temperature, humidity), precipitation), albedo), pressure), winds), winds_3d), ocean_currents))| {
+                    *temperature =
+                        snap_a.temperatures[i] * inv_t + snap_b.temperatures[i] * t;
+                    *humidity =
+                        snap_a.humidity[i] * inv_t + snap_b.humidity[i] * t;
+                    *precipitation =
+                        snap_a.precipitation[i] * inv_t + snap_b.precipitation[i] * t;
+                    *albedo =
+                        snap_a.albedo[i] * inv_t + snap_b.albedo[i] * t;
+                    *pressure =
+                        snap_a.pressure[i] * inv_t + snap_b.pressure[i] * t;
+                    *winds =
+                        snap_a.winds[i] * inv_t + snap_b.winds[i] * t;
+                    *winds_3d =
+                        snap_a.winds_3d[i] * inv_t + snap_b.winds_3d[i] * t;
+                    *ocean_currents =
+                        snap_a.ocean_currents[i] * inv_t + snap_b.ocean_currents[i] * t;
+                },
+            );
 
         let dominant_snap = if t < 0.5 { snap_a } else { snap_b };
         self.wind_arrows_cache

@@ -632,39 +632,110 @@ pub fn recolor_globe_mesh_in_place(
     elevations: &[f32],
     cell_colors: &[[f32; 4]],
 ) {
-    if let Some(VertexAttributeValues::Float32x4(colors)) =
+    let Some(VertexAttributeValues::Float32x4(colors)) =
         mesh.attribute_mut(Mesh::ATTRIBUTE_COLOR)
-    {
-        let mut offset = 0;
-        for (cell_id, cell) in topology.cells.iter().enumerate() {
-            let h = elevations[cell_id];
-            let top_color = cell_colors[cell_id];
-            let n_corners = cell.corners.len();
+    else {
+        return;
+    };
 
-            let wall_color = [
-                top_color[0] * 0.75,
-                top_color[1] * 0.75,
-                top_color[2] * 0.75,
-                top_color[3],
-            ];
+    let cells = &topology.cells;
 
-            // Центр
-            colors[offset] = top_color;
-            offset += 1;
+    // 1. Вычисляем границы цветовых данных каждой ячейки.
+    let mut offsets = Vec::with_capacity(cells.len() + 1);
+    offsets.push(0usize);
 
-            // Углы
-            for _ in 0..n_corners {
-                colors[offset] = top_color;
-                offset += 1;
-            }
+    let mut total_vertices = 0usize;
 
-            // Отвесные стены
-            for k in 0..n_corners {
-                if h > elevations[cell.neighbors[k]] {
-                    colors[offset..offset + 4].copy_from_slice(&[wall_color; 4]);
-                    offset += 4;
-                }
+    for (cell_id, cell) in cells.iter().enumerate() {
+        let h = elevations[cell_id];
+
+        let mut wall_count = 0usize;
+
+        for k in 0..cell.corners.len() {
+            if h > elevations[cell.neighbors[k]] {
+                wall_count += 1;
             }
         }
+
+        total_vertices += 1 + cell.corners.len() + wall_count * 4;
+        offsets.push(total_vertices);
     }
+
+    // Защита от несовпадения структуры меша.
+    if total_vertices != colors.len() {
+        warn!(
+            "[VIEWPORT] Color buffer mismatch: expected {}, actual {}",
+            total_vertices,
+            colors.len()
+        );
+        return;
+    }
+
+    // 2. Разделяем буфер на независимые группы ячеек.
+    const CELLS_PER_TASK: usize = 256;
+
+    let mut remaining = colors.as_mut_slice();
+
+    let mut tasks = Vec::with_capacity(
+        (cells.len() + CELLS_PER_TASK - 1) / CELLS_PER_TASK,
+    );
+
+    for start_cell in (0..cells.len()).step_by(CELLS_PER_TASK) {
+        let end_cell = (start_cell + CELLS_PER_TASK).min(cells.len());
+
+        let start_vertex = offsets[start_cell];
+        let end_vertex = offsets[end_cell];
+
+        let (task_colors, rest) =
+            remaining.split_at_mut(end_vertex - start_vertex);
+
+        tasks.push((
+            start_cell,
+            end_cell,
+            start_vertex,
+            task_colors,
+        ));
+
+        remaining = rest;
+    }
+
+    // 3. Перекрашиваем группы параллельно.
+    tasks.into_par_iter().for_each(
+        |(start_cell, end_cell, base_vertex, task_colors)| {
+            for cell_id in start_cell..end_cell {
+                let cell = &cells[cell_id];
+                let h = elevations[cell_id];
+
+                let local_start = offsets[cell_id] - base_vertex;
+                let cell_len = offsets[cell_id + 1] - offsets[cell_id];
+
+                let cell_buffer =
+                    &mut task_colors[local_start..local_start + cell_len];
+
+                let top_color = cell_colors[cell_id];
+
+                let wall_color = [
+                    top_color[0] * 0.75,
+                    top_color[1] * 0.75,
+                    top_color[2] * 0.75,
+                    top_color[3],
+                ];
+
+                // Центр и верхние углы.
+                let top_vertices = 1 + cell.corners.len();
+
+                cell_buffer[..top_vertices].fill(top_color);
+
+                // Боковые стенки.
+                let mut offset = top_vertices;
+
+                for k in 0..cell.corners.len() {
+                    if h > elevations[cell.neighbors[k]] {
+                        cell_buffer[offset..offset + 4].fill(wall_color);
+                        offset += 4;
+                    }
+                }
+            }
+        },
+    );
 }

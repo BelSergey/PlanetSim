@@ -712,14 +712,9 @@ fn render_ui_shell(world: &mut World) -> Result {
                         }
                         ActiveTab::World => {
                             // --- Секция 1: текущая планета ---
-                            let (cur_subdivs, cell_count, has_data) = {
+                            let (cur_subdivs, cell_count) = {
                                 let topo = world.resource::<WorldTopology>();
-                                let geo = world.resource::<GeologyLayer>();
-                                (
-                                    topo.subdivisions,
-                                    topo.cells.len(),
-                                    !geo.elevations.is_empty(),
-                                )
+                                (topo.subdivisions, topo.cells.len())
                             };
 
                             ui.heading("Текущая планета");
@@ -730,21 +725,15 @@ fn render_ui_shell(world: &mut World) -> Result {
                             ui.separator();
 
                             // --- Секция 2: радиус (live, без перегенерации) ---
-                            let mut radius_changed = false;
+                            // Радиус применяется масштабом родительского Globe. Не пересобираем
+                            // геометрию и речной меш при каждом шаге перетаскивания слайдера.
                             world.resource_scope(|_world, mut cfg: Mut<WorldConfig>| {
-                                radius_changed = ui
-                                    .add(
-                                        egui::Slider::new(&mut cfg.radius, 1.0..=20.0)
-                                            .step_by(0.1)
-                                            .text("Радиус"),
-                                    )
-                                    .changed();
+                                ui.add(
+                                    egui::Slider::new(&mut cfg.radius, 1.0..=20.0)
+                                        .step_by(0.1)
+                                        .text("Радиус"),
+                                );
                             });
-                            if radius_changed && has_data {
-                                let mut p = world.resource_mut::<WorldPipeline>();
-                                p.reposition_mesh = true;
-                                p.rebuild_rivers = true;
-                            }
 
                             ui.separator();
 

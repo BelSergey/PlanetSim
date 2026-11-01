@@ -1,5 +1,6 @@
 // src/viewport/mod.rs
 use rayon::prelude::*;
+use std::time::{Duration, Instant};
 pub mod camera_3d;
 pub mod hotkeys;
 pub mod mesh_globe;
@@ -431,16 +432,19 @@ fn sync_viewport_mesh(
     hydrology_config: Res<HydrologyConfig>,
     overlay: Res<MapOverlay>,
     view_config: Res<ViewportViewConfig>,
-    mut globe_query: Query<&mut Mesh3d, (With<Globe>, Without<RiverOverlayMesh>)>,
+    mut globe_query: Query<(&mut Mesh3d, &mut Transform), (With<Globe>, Without<RiverOverlayMesh>)>,
     mut river_query: Query<
         (&mut Mesh3d, &mut Visibility),
         (With<RiverOverlayMesh>, Without<Globe>),
     >,
     mut meshes: ResMut<Assets<Mesh>>,
-    // Задерживает удаление старого меша на 1 кадр, чтобы slab_allocator не делал free + grow одновременно
+    // Задерживает удаление старых мешей на 1 кадр.
     mut deferred_mesh_drops: Local<Vec<Handle<Mesh>>>,
+    // Радиус, под который в последний раз была построена геометрия.
+    mut mesh_base_radius: Local<Option<f32>>,
+    // Последнее применённое значение слайдера.
+    mut last_radius: Local<Option<f32>>,
 ) {
-    // Освобождаем старые меши с прошлого кадра, когда расширение GPU-буфера уже завершено
     deferred_mesh_drops.clear();
 
     if let Ok((_, mut river_vis)) = river_query.single_mut() {
@@ -454,43 +458,96 @@ fn sync_viewport_mesh(
         }
     }
 
-    if !pipeline.rebuild_mesh
-        && !pipeline.reposition_mesh
-        && !pipeline.recolor_mesh
-        && !pipeline.rebuild_rivers
-    {
-        return;
-    }
     if geology.elevations.is_empty() || climate.temperatures.is_empty() {
         return;
     }
 
-    // 1. Обновление меша глобуса
-    if let Ok(mut mesh_handle) = globe_query.single_mut() {
-        let flatten_water = view_config.flat_water;
+    // Временная диагностика микрофризов
+    let perf_total = Instant::now();
 
+    let mut perf_colors = Duration::ZERO;
+    let mut perf_recolor = Duration::ZERO;
+    let mut perf_mesh_build = Duration::ZERO;
+    let mut perf_reposition = Duration::ZERO;
+    let mut perf_insert = Duration::ZERO;
+    let mut perf_rivers = Duration::ZERO;
+
+    let perf_flags = (
+        pipeline.rebuild_mesh,
+        pipeline.reposition_mesh,
+        pipeline.recolor_mesh,
+        pipeline.rebuild_rivers,
+    );
+
+    let radius = world_config.radius.max(0.001);
+    let radius_changed = last_radius.is_none_or(|last| (last - radius).abs() > 1e-5);
+    if !pipeline.rebuild_mesh
+        && !pipeline.reposition_mesh
+        && !pipeline.recolor_mesh
+        && !pipeline.rebuild_rivers
+        && !radius_changed
+    {
+        return;
+    }
+
+    // Полная перестройка или изменение формы воды запекает текущий радиус в вершины.
+    // Обычное изменение радиуса масштабирует готовый Globe вместе с дочерними реками.
+    let geometry_rebuilt = pipeline.rebuild_mesh || pipeline.reposition_mesh;
+    let base_radius = if geometry_rebuilt {
+        radius
+    } else {
+        mesh_base_radius.unwrap_or(radius).max(0.001)
+    };
+
+    // 1. Обновление меша глобуса.
+    if let Ok((mut mesh_handle, mut globe_transform)) = globe_query.single_mut() {
         if pipeline.rebuild_mesh {
+            let timer = Instant::now();
             let colors = compute_overlay_colors(&overlay, &geology, &climate, &hydrology);
+            perf_colors += timer.elapsed();
+            let timer = Instant::now();
+
             let new_mesh = build_globe_mesh(
                 &topology,
                 &geology.elevations,
-                flatten_water,
+                view_config.flat_water,
                 &colors,
                 world_config.radius,
                 world_config.system_scale(),
             );
+
+            perf_mesh_build += timer.elapsed();
             deferred_mesh_drops.push(mesh_handle.0.clone());
             mesh_handle.0 = meshes.add(new_mesh);
-        } else if let Some(mut mesh) = meshes.get_mut(&mesh_handle.0) {
+            if globe_transform.scale != Vec3::ONE {
+                globe_transform.scale = Vec3::ONE;
+            }
+        } else {
             if pipeline.reposition_mesh {
+                let timer = Instant::now();
+
                 let new_positions = reposition_globe_mesh(
                     &topology,
                     &geology.elevations,
-                    flatten_water,
+                    view_config.flat_water,
                     world_config.radius,
                     world_config.system_scale(),
                 );
-                mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, new_positions);
+
+                perf_reposition += timer.elapsed();
+                if let Some(mut mesh) = meshes.get_mut(&mesh_handle.0) {
+                    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, new_positions);
+                }
+                if globe_transform.scale != Vec3::ONE {
+                    globe_transform.scale = Vec3::ONE;
+                }
+            } else {
+                // Globe — родитель речного меша, поэтому масштабируются оба объекта.
+                // Отношение сохраняет радиус и высоту рельефа в тех же пропорциях.
+                let target_scale = Vec3::splat(radius / base_radius);
+                if globe_transform.scale != target_scale {
+                    globe_transform.scale = target_scale;
+                }
             }
 
             if pipeline.recolor_mesh {
@@ -504,19 +561,36 @@ fn sync_viewport_mesh(
                         | MapOverlay::Pressure
                         | MapOverlay::Winds
                 );
-
                 if overlay_needs_recolor {
-                    let colors = compute_overlay_colors(&overlay, &geology, &climate, &hydrology);
-                    // Обновляем существующий буфер цветов без создания нового Vec и замены атрибута.
-                    recolor_globe_mesh_in_place(&mut mesh, &topology, &geology.elevations, &colors);
+                    if let Some(mut mesh) = meshes.get_mut(&mesh_handle.0) {
+                        let timer = Instant::now();
+                        let colors =
+                            compute_overlay_colors(&overlay, &geology, &climate, &hydrology);
+                        perf_colors += timer.elapsed();
+                        let timer = Instant::now();
+
+                        recolor_globe_mesh_in_place(
+                            &mut mesh,
+                            &topology,
+                            &geology.elevations,
+                            &colors,
+                        );
+
+                        perf_recolor += timer.elapsed();
+                    }
                 }
             }
         }
+        *mesh_base_radius = Some(base_radius);
     }
 
-    // 2. Обновление меша речной сети
+    // 2. Пересборка речной сети. Если основной меш не перестраивался,
+    // строим реки в базовом радиусе: масштабирует их родительский Globe.
     if pipeline.rebuild_mesh || pipeline.reposition_mesh || pipeline.rebuild_rivers {
         if let Ok((mut river_mesh_handle, _)) = river_query.single_mut() {
+            let river_height_scale = base_radius / world_config.reference_system_radius.max(0.001);
+            let timer = Instant::now();
+
             let new_river_mesh = build_river_mesh(
                 &topology,
                 &geology,
@@ -526,15 +600,29 @@ fn sync_viewport_mesh(
                 world_config.radius,
                 world_config.system_scale(),
             );
+
+            perf_rivers += timer.elapsed();
             deferred_mesh_drops.push(river_mesh_handle.0.clone());
             river_mesh_handle.0 = meshes.add(new_river_mesh);
         }
     }
 
+    *last_radius = Some(radius);
     pipeline.rebuild_mesh = false;
     pipeline.reposition_mesh = false;
     pipeline.recolor_mesh = false;
     pipeline.rebuild_rivers = false;
+    info!(
+        "[VIEWPORT PERF] total={:.2}ms | colors={:.2}ms | recolor={:.2}ms | insert={:.2}ms | mesh_build={:.2}ms | reposition={:.2}ms | rivers={:.2}ms | flags={:?}",
+        perf_total.elapsed().as_secs_f64() * 1000.0,
+        perf_colors.as_secs_f64() * 1000.0,
+        perf_recolor.as_secs_f64() * 1000.0,
+        perf_insert.as_secs_f64() * 1000.0,
+        perf_mesh_build.as_secs_f64() * 1000.0,
+        perf_reposition.as_secs_f64() * 1000.0,
+        perf_rivers.as_secs_f64() * 1000.0,
+        perf_flags,
+    );
 }
 
 fn compute_overlay_colors(

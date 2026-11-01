@@ -905,10 +905,10 @@ fn build_arrows_from_samples(
     vectors: &[bevy::math::Vec3],
     elevations: Option<&[f32]>,
 ) -> Vec<(usize, f32)> {
-let mut speeds: Vec<f32> = vectors.par_iter().map(|v| v.length()).collect();
-let idx = ((speeds.len() as f32) * 0.95) as usize;
-speeds.select_nth_unstable_by(idx, |a, b| a.total_cmp(b));
-let max_speed = speeds.get(idx).copied().unwrap_or(0.0001).max(0.0001);
+    let mut speeds: Vec<f32> = vectors.par_iter().map(|v| v.length()).collect();
+    let idx = ((speeds.len() as f32) * 0.95) as usize;
+    speeds.select_nth_unstable_by(idx, |a, b| a.total_cmp(b));
+    let max_speed = speeds.get(idx).copied().unwrap_or(0.0001).max(0.0001);
 
     let mut arrows = Vec::with_capacity(samples.len());
     for &i in samples {
