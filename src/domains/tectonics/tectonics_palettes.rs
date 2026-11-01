@@ -3,11 +3,12 @@
 use super::tectonics_data::{GeologyLayer, PlateType, RockType};
 use bevy::color::{Color, ColorToComponents};
 use bevy::prelude::*;
+use rayon::prelude::*;
 
 pub fn build_lithology_colors(geology: &GeologyLayer) -> Vec<[f32; 4]> {
     geology
         .lithology
-        .iter()
+        .par_iter()
         .enumerate()
         .map(|(i, &rock)| {
             let elev = geology.elevations[i];
@@ -45,7 +46,7 @@ pub fn build_lithology_colors(geology: &GeologyLayer) -> Vec<[f32; 4]> {
 pub fn build_elevation_colors(geology: &GeologyLayer) -> Vec<[f32; 4]> {
     geology
         .elevations
-        .iter()
+        .par_iter()
         .map(|&h| elevation_to_color(h).to_linear().to_f32_array())
         .collect()
 }
@@ -82,7 +83,7 @@ pub fn build_plate_colors(geology: &GeologyLayer) -> Vec<[f32; 4]> {
 
     geology
         .plate_ids
-        .iter()
+        .par_iter()
         .enumerate()
         .map(|(i, &plate_id)| {
             if geology.volcano_mask[i] {
@@ -121,4 +122,36 @@ pub fn elevation_to_color(h: f32) -> Color {
         x if x < 0.64 => Color::srgb(0.87, 0.33, 0.12),   // кирпич (было 0.55)
         _ => Color::srgb(0.95, 0.18, 0.10),               // раскалённый красный (было 0.7)
     }
+}
+
+pub fn build_ruggedness_colors(geology: &GeologyLayer) -> Vec<[f32; 4]> {
+    geology
+        .terrain_ruggedness
+        .par_iter()
+        .enumerate()
+        .map(|(i, &rug)| {
+            let elev = geology.elevations[i];
+            let r_val = rug.clamp(0.0, 1.0);
+
+            if elev <= 0.0 {
+                let r = 0.04 + r_val * 0.18;
+                let g = 0.10 + r_val * 0.28;
+                let b = 0.22 + r_val * 0.35;
+                return Color::srgb(r, g, b).to_linear().to_f32_array();
+            }
+
+            let (r, g, b) = if r_val < 0.25 {
+                let t = r_val / 0.25;
+                (0.18 + t * 0.52, 0.56 + t * 0.16, 0.24 - t * 0.06)
+            } else if r_val < 0.60 {
+                let t = (r_val - 0.25) / 0.35;
+                (0.70 + t * 0.22, 0.72 - t * 0.42, 0.18 - t * 0.06)
+            } else {
+                let t = (r_val - 0.60) / 0.40;
+                (0.92 - t * 0.05, 0.30 - t * 0.10 + t * 0.55, 0.12 + t * 0.78)
+            };
+
+            Color::srgb(r, g, b).to_linear().to_f32_array()
+        })
+        .collect()
 }

@@ -36,6 +36,7 @@ pub fn hotkey_controls(
             MapOverlay::Soils => MapOverlay::SoilMoisture,
             MapOverlay::SoilMoisture => MapOverlay::Biomes,
             MapOverlay::Biomes => MapOverlay::SpaceView,
+            MapOverlay::Ruggedness => MapOverlay::Temperature,
         };
         let is_space = *overlay == MapOverlay::SpaceView;
 

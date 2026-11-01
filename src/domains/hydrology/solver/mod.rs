@@ -5,6 +5,7 @@ mod rivers;
 mod soils;
 
 use noise::{Fbm, NoiseFn, Perlin};
+use rayon::prelude::*;
 
 use super::{
     hydrology_config::HydrologyConfig,
@@ -37,25 +38,30 @@ impl SurfaceNoise {
         let num_cells = topology.cells.len();
         let fbm = Fbm::<Perlin>::new(seed.wrapping_add(0x517C_C1B7));
 
+        // Параллельный расчет шумов по всем клеткам с помощью rayon
+        let fields: Vec<(f32, f32, f32)> = topology.cells.par_iter().map(|cell| {
+            let p = cell.center.as_dvec3();
+            let t_macro = fbm.get([p.x * 11.0 + 17.3, p.y * 11.0 - 29.1, p.z * 11.0 + 43.7]) as f32;
+            let t_micro = fbm.get([p.x * 28.0 - 11.4, p.y * 28.0 + 51.2, p.z * 28.0 - 19.8]) as f32;
+            let m_macro = fbm.get([p.x * 12.0 - 63.1, p.y * 12.0 + 14.8, p.z * 12.0 - 37.5]) as f32;
+            let m_micro = fbm.get([p.x * 29.0 + 41.2, p.y * 29.0 - 23.9, p.z * 29.0 + 68.4]) as f32;
+            let r_noise = fbm.get([p.x * 22.0 + 83.5, p.y * 22.0 + 19.2, p.z * 22.0 - 54.6]) as f32;
+            
+            (
+                t_macro * 0.70 + t_micro * 0.30,
+                m_macro * 0.70 + m_micro * 0.30,
+                r_noise,
+            )
+        }).collect();
+
         let mut temp_jitter = Vec::with_capacity(num_cells);
         let mut moisture_jitter = Vec::with_capacity(num_cells);
         let mut meander_field = Vec::with_capacity(num_cells);
 
-        for cell in topology.cells.iter() {
-            let p = cell.center.as_dvec3();
-
-            // Двухмасштабный шум для рваных природных границ (лесостепь / лесотундра)
-            let t_macro = fbm.get([p.x * 11.0 + 17.3, p.y * 11.0 - 29.1, p.z * 11.0 + 43.7]) as f32;
-            let t_micro = fbm.get([p.x * 28.0 - 11.4, p.y * 28.0 + 51.2, p.z * 28.0 - 19.8]) as f32;
-            temp_jitter.push(t_macro * 0.70 + t_micro * 0.30);
-
-            let m_macro = fbm.get([p.x * 12.0 - 63.1, p.y * 12.0 + 14.8, p.z * 12.0 - 37.5]) as f32;
-            let m_micro = fbm.get([p.x * 29.0 + 41.2, p.y * 29.0 - 23.9, p.z * 29.0 + 68.4]) as f32;
-            moisture_jitter.push(m_macro * 0.70 + m_micro * 0.30);
-
-            // Извилистые гряды для отклонения рек на плоских низменностях
-            let r_noise = fbm.get([p.x * 22.0 + 83.5, p.y * 22.0 + 19.2, p.z * 22.0 - 54.6]) as f32;
-            meander_field.push(r_noise);
+        for (temp, moisture, meander) in fields {
+            temp_jitter.push(temp);
+            moisture_jitter.push(moisture);
+            meander_field.push(meander);
         }
 
         Self {
@@ -102,20 +108,25 @@ pub fn apply_surface_feedback_to_climate(
     climate
         .surface_wetness
         .resize(num_cells, c_config.land_moisture_recycling);
+    climate.surface_heat_capacity.resize(num_cells, 0.0);
 
     let threshold = h_config.river_threshold.max(1e-6);
 
-    for i in 0..num_cells {
+    climate.surface_albedo.par_iter_mut()
+        .zip(climate.surface_wetness.par_iter_mut())
+        .zip(climate.surface_heat_capacity.par_iter_mut())
+        .enumerate()
+        .for_each(|(i, ((albedo_out, wetness_out), heat_capacity_out))| {
         if geology.elevations[i] <= 0.0 {
             let is_ice = matches!(hydrology.biomes[i], Biome::SeaIce);
-            climate.surface_albedo[i] = if is_ice {
+            *albedo_out = if is_ice {
                 0.60 // морской лёд без снега
             } else {
                 c_config.ocean_albedo
             };
-            climate.surface_wetness[i] = if is_ice { 0.05 } else { 1.0 };
-            climate.surface_heat_capacity[i] = if is_ice { 0.25 } else { 0.0 };
-            continue;
+            *wetness_out = if is_ice { 0.05 } else { 1.0 };
+            *heat_capacity_out = if is_ice { 0.25 } else { 0.0 };
+            return;
         }
 
         let biome = hydrology.biomes[i];
@@ -127,7 +138,7 @@ pub fn apply_surface_feedback_to_climate(
         let (_, _, _, biome_albedo) = biome_satellite_rgb(biome);
         let moisture_darkening = sm * 0.035;
         let river_water_darkening = (flow_ratio.sqrt() * 0.015).clamp(0.0, 0.05);
-        climate.surface_albedo[i] =
+        *albedo_out =
             (biome_albedo - moisture_darkening - river_water_darkening).clamp(0.08, 0.75);
 
         // 2. Испаряющая способность поверхности (surface_wetness):
@@ -155,7 +166,7 @@ pub fn apply_surface_feedback_to_climate(
         let raw_wetness = sm * 0.55 + vegetation_transpiration + river_evap;
         // Плавно смешиваем с базовым рециклингом конфига (70% биомы/реки + 30% базовый фон),
         // чтобы 2-й проход усиливал зеленые коридоры рек, но не выжигал переходные зоны в пустыню
-        climate.surface_wetness[i] = raw_wetness.max(c_config.land_moisture_recycling * 0.6);
+        *wetness_out = raw_wetness.max(c_config.land_moisture_recycling * 0.6);
 
         let hc_base = match biome {
             Biome::Wetland => 0.92,
@@ -172,6 +183,6 @@ pub fn apply_surface_feedback_to_climate(
             _ => 0.35,
         };
         // Влажность почвы повышает теплоёмкость (вода ≈4.2 vs сухая почва ≈0.8)
-        climate.surface_heat_capacity[i] = (hc_base * (0.7 + 0.55 * sm)).clamp(0.08, 1.0);
-    }
+        *heat_capacity_out = (hc_base * (0.7 + 0.55 * sm)).clamp(0.08, 1.0);
+    });
 }

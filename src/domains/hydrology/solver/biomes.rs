@@ -1,6 +1,7 @@
 // src/domains/hydrology/solver/biomes.rs
 
 use super::SurfaceNoise;
+use rayon::prelude::*;
 use crate::{
     domains::{
         climate::climate_data::ClimateLayer,
@@ -21,9 +22,11 @@ pub(super) fn compute_biomes(
     config: &HydrologyConfig,
     noise: &SurfaceNoise,
 ) {
-    let num_cells = topology.cells.len();
-
-    for i in 0..num_cells {
+    let soils = &hydrology.soils;
+    let soil_textures = &hydrology.soil_texture;
+    let flow_accumulation = &hydrology.flow_accumulation;
+    let soil_moisture = &hydrology.soil_moisture;
+    hydrology.biomes.par_iter_mut().enumerate().for_each(|(i, biome_out)| {
         let elev = geology.elevations[i];
 
         // 1. Сезонные температуры и осадки
@@ -46,7 +49,7 @@ pub(super) fn compute_biomes(
         // 2. Океанические биомы (с естественной кромкой морского льда)
         if elev <= 0.0 {
             let ice_jitter = noise.temp_jitter[i] * 0.8;
-            hydrology.biomes[i] = if mean_temp + ice_jitter < -4.5 || warm_temp + ice_jitter < -1.0
+            *biome_out = if mean_temp + ice_jitter < -4.5 || warm_temp + ice_jitter < -1.0
             {
                 Biome::SeaIce
             } else if elev > -0.09 {
@@ -54,7 +57,7 @@ pub(super) fn compute_biomes(
             } else {
                 Biome::DeepOcean
             };
-            continue;
+            return;
         }
 
         let p_spring = climate.spring.precipitation[i];
@@ -79,37 +82,37 @@ pub(super) fn compute_biomes(
             }
         }
 
-        let soil = hydrology.soils[i];
-        let [sand, _silt, clay] = hydrology.soil_texture[i];
-        let flow = hydrology.flow_accumulation[i];
+        let soil = soils[i];
+        let [sand, _silt, clay] = soil_textures[i];
+        let flow = flow_accumulation[i];
 
         // 4. Криосфера и высокогорные скалы
         // Вечные льды (ледниковые щиты и снежные вершины)
         if eff_warm_temp < 0.0 || (eff_mean_temp < -9.0 && eff_warm_temp < 3.5) {
-            hydrology.biomes[i] = Biome::IceSheet;
-            continue;
+            *biome_out = Biome::IceSheet;
+            return;
         }
 
         // Высокогорные скалы и осыпи (крутые склоны на Leptosol или выше линии леса)
         if soil == SoilType::Leptosol
             && (elev > 0.22 + m_jit * 0.02 || max_slope > config.mountain_slope_threshold * 1.15)
         {
-            hydrology.biomes[i] = Biome::AlpineBare;
-            continue;
+            *biome_out = Biome::AlpineBare;
+            return;
         }
 
         // Тундра (короткое холодное лето, деревья не могут вырасти, мерзлотный Gelisol)
         if eff_warm_temp < 8.5 || soil == SoilType::Gelisol {
-            hydrology.biomes[i] = if max_slope > config.mountain_slope_threshold {
+            *biome_out = if max_slope > config.mountain_slope_threshold {
                 Biome::AlpineBare
             } else {
                 Biome::Tundra
             };
-            continue;
+            return;
         }
 
         // 5. ГЛАВНЫЙ ИСТОЧНИК ВЛАГИ ДЛЯ БИОМОВ — ВЛАЖНОСТЬ ПОЧВЫ (soil_moisture)
-        let sm = hydrology.soil_moisture[i];
+        let sm = soil_moisture[i];
 
         // Переводим влажность почвы [0..1] в эквивалентный индекс увлажнения Уиттекера
         // и возмущаем порог 3D-шумом (±12%) для формирования лесостепи и пятнистых переходов
@@ -130,8 +133,8 @@ pub(super) fn compute_biomes(
             && (soil == SoilType::Gleysol || clay > 0.36)
             && (sm > 0.74 - m_jit * 0.04 || (is_major_river && sm > 0.58))
         {
-            hydrology.biomes[i] = Biome::Wetland;
-            continue;
+            *biome_out = Biome::Wetland;
+            return;
         }
 
         // Б) Пойменный оазис / галерейный лес (RiparianOasis):
@@ -139,12 +142,12 @@ pub(super) fn compute_biomes(
             && rain_only_sm < 0.28
             && (river_moisture_surplus > 0.16 || (is_major_river && sm > 0.36))
         {
-            hydrology.biomes[i] = Biome::RiparianOasis;
-            continue;
+            *biome_out = Biome::RiparianOasis;
+            return;
         }
 
         // 7. Классификация Уиттекера по влажности почвы и сезонности
-        hydrology.biomes[i] = classify_whittaker_biome(
+        *biome_out = classify_whittaker_biome(
             eff_mean_temp,
             eff_warm_temp,
             eff_cold_temp,
@@ -154,7 +157,7 @@ pub(super) fn compute_biomes(
             sand,
             soil,
         );
-    }
+    });
 }
 
 #[allow(clippy::too_many_arguments)]

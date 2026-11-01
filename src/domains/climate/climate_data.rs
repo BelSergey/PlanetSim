@@ -139,4 +139,65 @@ impl ClimateLayer {
         let t = ((2.0 - temp_c) / 6.0).clamp(0.0, 1.0);
         t * t * (3.0 - 2.0 * t)
     }
+    pub fn interpolate_from_orbit(&mut self, season_factor: f32) {
+        let num_cells = self.spring.temperatures.len();
+        if num_cells == 0
+            || self.summer.temperatures.len() != num_cells
+            || self.winter.temperatures.len() != num_cells
+        {
+            return;
+        }
+
+        let (snap_a, snap_b, t) = if season_factor >= 0.0 {
+            (&self.spring, &self.summer, season_factor.clamp(0.0, 1.0))
+        } else {
+            (&self.spring, &self.winter, (-season_factor).clamp(0.0, 1.0))
+        };
+
+        let inv_t = 1.0 - t;
+
+        use rayon::prelude::*;
+        let t = t;
+
+        self.temperatures
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(i, v)| *v = snap_a.temperatures[i] * inv_t + snap_b.temperatures[i] * t);
+        self.humidity
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(i, v)| *v = snap_a.humidity[i] * inv_t + snap_b.humidity[i] * t);
+        self.precipitation
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(i, v)| *v = snap_a.precipitation[i] * inv_t + snap_b.precipitation[i] * t);
+        self.albedo
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(i, v)| *v = snap_a.albedo[i] * inv_t + snap_b.albedo[i] * t);
+        self.pressure
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(i, v)| *v = snap_a.pressure[i] * inv_t + snap_b.pressure[i] * t);
+        self.winds
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(i, v)| *v = snap_a.winds[i] * inv_t + snap_b.winds[i] * t);
+        self.winds_3d
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(i, v)| *v = snap_a.winds_3d[i] * inv_t + snap_b.winds_3d[i] * t);
+        self.ocean_currents
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(i, v)| {
+                *v = snap_a.ocean_currents[i] * inv_t + snap_b.ocean_currents[i] * t
+            });
+
+        let dominant_snap = if t < 0.5 { snap_a } else { snap_b };
+        self.wind_arrows_cache
+            .clone_from(&dominant_snap.wind_arrows_cache);
+        self.current_arrows_cache
+            .clone_from(&dominant_snap.current_arrows_cache);
+    }
 }

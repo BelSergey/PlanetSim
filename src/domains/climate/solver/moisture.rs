@@ -34,20 +34,18 @@ pub(super) fn compute_season_moisture(
     snap: &mut SeasonalSnapshot,
 ) {
     let num_cells = topology.cells.len();
-    let nbrs = &topology.cells;
+    let neighbor_ids = &precalc.neighbor_ids_flat;
     let elevs = &geology.elevations;
     let offs = &precalc.neighbor_offsets;
     let hex_rad = precalc.avg_hex_rad;
 
     // 1. Опорная скорость ветра по суше (чтобы трение о рельеф не останавливало перенос над материками)
-    let mut land_wind_sum = 0.0_f32;
-    let mut land_cnt = 0usize;
-    for i in 0..num_cells {
-        if elevs[i] > 0.0 {
-            land_wind_sum += wind_speed[i];
-            land_cnt += 1;
-        }
-    }
+    let (land_wind_sum, land_cnt) = wind_speed
+        .par_iter()
+        .zip(elevs.par_iter())
+        .filter(|(_, elevation)| **elevation > 0.0)
+        .map(|(speed, _)| (*speed, 1usize))
+        .reduce(|| (0.0_f32, 0usize), |a, b| (a.0 + b.0, a.1 + b.1));
     let avg_wind = if land_cnt > 0 {
         (land_wind_sum / land_cnt as f32).max(1e-4)
     } else {
@@ -56,7 +54,10 @@ pub(super) fn compute_season_moisture(
     let ref_wind = avg_wind * 1.15;
 
     // 2. Влагоемкость нижней тропосферы (облачного слоя 850 гПа) и стартовый пар
-    for i in 0..num_cells {
+    scratch.specific_humidity.par_iter_mut()
+        .zip(scratch.moisture_capacity.par_iter_mut())
+        .enumerate()
+        .for_each(|(i, (humidity_out, capacity_out))| {
         let p = snap.pressure[i].clamp(-1.0, 1.0);
         // Температура воздушной массы на высоте переноса облаков не испытывает резкого скачка
         // на линии пляжа (смешиваем приземную температуру уровня моря с широтным фоном океана
@@ -70,7 +71,7 @@ pub(super) fn compute_season_moisture(
         };
 
         let cap = saturation_capacity(cloud_layer_t);
-        scratch.moisture_capacity[i] = cap;
+        *capacity_out = cap;
 
         if elevs[i] <= 0.0 {
             let ice_bonus = if surface_wetness[i] < 0.20 { 0.20 } else { 1.0 };
@@ -79,15 +80,15 @@ pub(super) fn compute_season_moisture(
             let subsidence_mod = 1.0 - 0.18 * p.max(0.0);
             let init_rh =
                 (base_rh * subsidence_mod) * config.ocean_evaporation_rate.clamp(0.5, 1.15);
-            scratch.specific_humidity[i] = cap * init_rh.clamp(0.35, 0.96);
+            *humidity_out = cap * init_rh.clamp(0.35, 0.96);
         } else {
             let base_alb = surface_albedo[i];
             let wetness = surface_wetness[i].max(0.18);
             let snow_cover = ((snap.albedo[i] - base_alb) / 0.50).clamp(0.0, 1.0);
             let init_land_rh = (0.18 + 0.35 * wetness + 0.35 * snow_cover).clamp(0.15, 0.85);
-            scratch.specific_humidity[i] = cap * init_land_rh;
+            *humidity_out = cap * init_land_rh;
         }
-    }
+    });
 
     // 3. ЭТАП 1: Чистая направленная адвекция по ветру (без паразитного разбавления боковыми клетками)
     let mean_courant = 0.58_f32;
@@ -109,7 +110,6 @@ pub(super) fn compute_season_moisture(
             let is_ocean = elevs[i] <= 0.0;
             let sp = wind_speed[i];
             let my_cap = cap_arr[i];
-            let neighbors = &nbrs[i].neighbors;
             let my_p = snap.pressure[i].clamp(-1.0, 1.0);
 
             // Корень .sqrt() подтягивает умеренные континентальные ветры, чтобы они не застревали у берега
@@ -125,7 +125,7 @@ pub(super) fn compute_season_moisture(
                 for j in start..end {
                     let w = w_air[j];
                     if w > 0.0 {
-                        upwind_q += prev[neighbors[j - start]] * w;
+                        upwind_q += prev[neighbor_ids[j] as usize] * w;
                     }
                 }
                 upwind_q / w_sum
@@ -185,23 +185,31 @@ pub(super) fn compute_season_moisture(
         let out = &mut scratch.specific_humidity;
 
         out.par_iter_mut().enumerate().for_each(|(i, q_out)| {
-            let neighbors = &nbrs[i].neighbors;
-            if neighbors.is_empty() {
+            let start = offs[i];
+            let end = offs[i + 1];
+            let degree = end - start;
+            if degree == 0 {
                 *q_out = prev[i];
                 return;
             }
             let my_p = snap.pressure[i].clamp(-1.0, 1.0);
             let chaos_mix = (0.35 - my_p * 0.15).clamp(0.15, 0.50);
-            let sum: f32 = neighbors.iter().map(|&n_id| prev[n_id]).sum();
-            let nbr_q = sum / neighbors.len() as f32;
+            let mut sum = 0.0f32;
+            for j in start..end {
+                sum += prev[neighbor_ids[j] as usize];
+            }
+            let nbr_q = sum / degree as f32;
             *q_out = (prev[i] * (1.0 - chaos_mix) + nbr_q * chaos_mix).min(cap_arr[i]);
         });
     }
 
     // 5. ЭТАП 3: Оседание воздуха (субсиденция) в антициклонах и финальная RH [0.0 .. 1.0]
-    for i in 0..num_cells {
+    snap.humidity.par_iter_mut()
+        .zip(scratch.specific_humidity.par_iter_mut())
+        .enumerate()
+        .for_each(|(i, (humidity_out, specific_humidity_out))| {
         let my_cap = scratch.moisture_capacity[i];
-        let mut rh = (scratch.specific_humidity[i] / my_cap).clamp(0.0, 1.0);
+        let mut rh = (*specific_humidity_out / my_cap).clamp(0.0, 1.0);
         let my_p = snap.pressure[i].clamp(-1.0, 1.0);
 
         if my_p > 0.05 {
@@ -228,7 +236,7 @@ pub(super) fn compute_season_moisture(
             rh = (rh + (1.0 - rh) * cyclone_boost).clamp(0.0, 1.0);
         }
 
-        snap.humidity[i] = rh.clamp(0.0, 1.0);
-        scratch.specific_humidity[i] = rh * my_cap;
-    }
+        *humidity_out = rh.clamp(0.0, 1.0);
+        *specific_humidity_out = rh * my_cap;
+    });
 }

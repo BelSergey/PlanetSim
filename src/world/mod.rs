@@ -17,21 +17,28 @@ use crate::domains::{
 
 #[derive(Resource, Clone)]
 pub struct WorldConfig {
-    /// Радиус планеты в мировых координатах (live, применяется к текущей планете)
+    /// Радиус планеты в мировых координатах (live, применяется к текущей планете).
     pub radius: f32,
+
+    /// Радиус планеты, при котором звёздная система имеет исходный размер.
+    pub reference_system_radius: f32,
+
     /// Размерность, с которой будет создана СЛЕДУЮЩАЯ планета.
     /// Размерность ТЕКУЩЕЙ планеты хранится в `WorldTopology.subdivisions`.
     pub next_planet_subdivisions: u32,
-    /// Глобальный сид генерации мира (тектоника, ветровые волны, меандры рек, экотоны биомов)
+
+    /// Глобальный сид генерации мира.
     pub seed: u32,
 }
 
 impl Default for WorldConfig {
     fn default() -> Self {
         let mut rng = rand::rng();
+
         Self {
-            radius: 5.0,                 // release - 7
-            next_planet_subdivisions: 7, // release - 8
+            radius: 5.0,
+            reference_system_radius: 5.0,
+            next_planet_subdivisions: 7,
             seed: rng.random_range(0..=u32::MAX),
         }
     }
@@ -40,6 +47,12 @@ impl Default for WorldConfig {
 impl WorldConfig {
     pub fn randomize_seed(&mut self) {
         self.seed = rand::rng().random_range(0..=u32::MAX);
+    }
+
+    /// Масштаб видимой звёздной системы относительно исходного размера.
+    #[inline]
+    pub fn system_scale(&self) -> f32 {
+        self.radius / self.reference_system_radius.max(0.001)
     }
 }
 
@@ -75,11 +88,13 @@ fn setup_topology(mut commands: Commands, config: Res<WorldConfig>) {
 /// Вызывается из эксклюзивных систем (например, из `render_ui_shell`).
 pub fn start_new_planet(world: &mut World, subdivisions: u32) {
     let current = world.resource::<WorldTopology>().subdivisions;
+
     if current != subdivisions {
         info!(
             "Пересборка топологии: {} -> {} subdiv",
             current, subdivisions
         );
+
         *world.resource_mut::<WorldTopology>() = WorldTopology::new(subdivisions);
     }
 
@@ -95,6 +110,7 @@ pub fn start_new_planet(world: &mut World, subdivisions: u32) {
     world
         .resource_mut::<GenerationRequest>()
         .request(PipelineStage::Tectonics);
+
     world
         .resource_mut::<NextState<AppState>>()
         .set(AppState::InGame);

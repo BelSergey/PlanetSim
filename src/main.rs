@@ -13,22 +13,18 @@ use ui::UiPlugin;
 use viewport::ViewportPlugin;
 use world::WorldPlugin;
 
-use thread_priority::{ThreadPriority, set_current_thread_priority};
 
 fn main() {
     let total_threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
 
-    // Оставляем 2 потока под главный цикл игры и звук.
-    let worker_threads = total_threads.saturating_sub(2).max(1);
+    // Оставляем один логический поток под главный цикл игры; расчётные задачи идут через Rayon.
+    let worker_threads = total_threads.saturating_sub(1).max(1);
 
     let _ = rayon::ThreadPoolBuilder::new()
         .num_threads(worker_threads)
         .thread_name(|i| format!("planet-gen-{}", i))
-        .start_handler(|_| {
-            let _ = set_current_thread_priority(ThreadPriority::Min);
-        })
         .build_global();
 
     App::new()

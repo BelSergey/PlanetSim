@@ -91,6 +91,7 @@ pub struct GeologyLayer {
     pub volcanoes: Vec<Volcano>,
     pub volcano_mask: Vec<bool>,
     pub lithology: Vec<RockType>,
+    pub terrain_ruggedness: Vec<f32>,
 }
 
 impl GeologyLayer {
@@ -99,5 +100,6 @@ impl GeologyLayer {
         self.elevations.resize(num_cells, 0.0);
         self.volcano_mask.resize(num_cells, false);
         self.lithology.resize(num_cells, RockType::default());
+        self.terrain_ruggedness.resize(num_cells, 0.0);
     }
 }

@@ -2,6 +2,8 @@
 
 use std::{cmp::Ordering, collections::BinaryHeap, f32::consts::PI};
 
+use rayon::prelude::*;
+
 use super::SurfaceNoise;
 use crate::{
     domains::{
@@ -62,64 +64,59 @@ pub(super) fn compute_rivers(
     // =========================================================================
     // 1. РАСЧЕТ ПОЛЯ СТОКА (Runoff = Осадки - Эвапотранспирация Будыко + Таяние снега)
     // =========================================================================
-    for i in 0..num_cells {
-        let elev = geology.elevations[i];
-        if elev <= 0.0 {
-            hydrology.runoff[i] = 0.0;
-            hydrology.flow_dir[i] = None;
-            hydrology.flow_accumulation[i] = 0.0;
-            continue;
-        }
-
-        let mut max_slope = 0.0_f32;
-        for &n_id in &topology.cells[i].neighbors {
-            let diff = (elev - geology.elevations[n_id]).abs();
-            if diff > max_slope {
-                max_slope = diff;
+    hydrology
+        .runoff
+        .par_iter_mut()
+        .zip(hydrology.flow_dir.par_iter_mut())
+        .zip(hydrology.flow_accumulation.par_iter_mut())
+        .zip(meander_bias.par_iter_mut())
+        .enumerate()
+        .for_each(|(i, (((runoff_out, flow_dir_out), flow_acc_out), meander_out))| {
+            let elev = geology.elevations[i];
+            if elev <= 0.0 {
+                *runoff_out = 0.0;
+                *flow_dir_out = None;
+                *flow_acc_out = 0.0;
+                *meander_out = 0.0;
+                return;
             }
-        }
-        let flat_factor = (1.0 - max_slope / 0.018).clamp(0.0, 1.0);
-        meander_bias[i] = noise.meander_field[i] * 0.0075 * flat_factor;
 
-        let t_spring = climate.spring.temperatures[i];
-        let t_summer = climate.summer.temperatures[i];
-        let t_winter = climate.winter.temperatures[i];
-        let mean_temp = (2.0 * t_spring + t_summer + t_winter) * 0.25;
+            let mut max_slope = 0.0_f32;
+            for &n_id in &topology.cells[i].neighbors {
+                let diff = (elev - geology.elevations[n_id]).abs();
+                if diff > max_slope {
+                    max_slope = diff;
+                }
+            }
+            let flat_factor = (1.0 - max_slope / 0.018).clamp(0.0, 1.0);
+            *meander_out = noise.meander_field[i] * 0.0075 * flat_factor;
 
-        let p_spring = climate.spring.precipitation[i];
-        let p_summer = climate.summer.precipitation[i];
-        let p_winter = climate.winter.precipitation[i];
-        let annual_precip = (2.0 * p_spring + p_summer + p_winter) * 0.25;
+            let t_spring = climate.spring.temperatures[i];
+            let t_summer = climate.summer.temperatures[i];
+            let t_winter = climate.winter.temperatures[i];
+            let mean_temp = (2.0 * t_spring + t_summer + t_winter) * 0.25;
 
-        // Зимний снег, который тает весной/летом, дает залповый сток (не успевая испариться)
-        let cold_temp = t_winter.min(t_spring);
-        let warm_temp = t_summer.max(t_spring);
-        let cold_precip = if t_winter < t_summer {
-            p_winter
-        } else {
-            p_summer
-        };
-        let snow_share = ClimateLayer::snow_fraction(cold_temp);
-        let melt_factor = ((warm_temp - 0.0) / 8.0).clamp(0.0, 1.0);
-        let snowmelt_bonus = cold_precip * snow_share * melt_factor * 0.30;
+            let p_spring = climate.spring.precipitation[i];
+            let p_summer = climate.summer.precipitation[i];
+            let p_winter = climate.winter.precipitation[i];
+            let annual_precip = (2.0 * p_spring + p_summer + p_winter) * 0.25;
 
-        // Испаряемость (PET) и влагоудержание почвы (WHC):
-        // Глинистые глубокие почвы удерживают влагу у корней и испаряют больше;
-        // скалы (Leptosol) и пески быстро сбрасывают воду в сток
-        let whc = hydrology.water_capacity[i];
-        let pet = ((mean_temp + 10.0).max(0.5) * 0.016 * config.aridity_evap_scale).max(0.02);
-        let aridity_index = (pet / annual_precip.max(1e-4)) * (0.55 + 0.65 * whc);
+            let cold_temp = t_winter.min(t_spring);
+            let warm_temp = t_summer.max(t_spring);
+            let cold_precip = if t_winter < t_summer { p_winter } else { p_summer };
+            let snow_share = ClimateLayer::snow_fraction(cold_temp);
+            let melt_factor = ((warm_temp - 0.0) / 8.0).clamp(0.0, 1.0);
+            let snowmelt_bonus = cold_precip * snow_share * melt_factor * 0.30;
 
-        // Кривая Будыко для фактической эвапотранспирации (AET)
-        let aet_ratio = aridity_index / (1.0 + aridity_index * aridity_index).sqrt();
-        let net_rain_runoff = annual_precip * (1.0 - aet_ratio).clamp(0.05, 0.95);
-
-        // Потери в глубокие карстовые горизонты (известняки)
-        let karst_loss = geology.lithology[i].karst_permeability() * 0.25;
-
-        let raw_runoff = (net_rain_runoff + snowmelt_bonus) * (1.0 - karst_loss);
-        hydrology.runoff[i] = (raw_runoff * config.runoff_multiplier).max(0.0);
-    }
+            let whc = hydrology.water_capacity[i];
+            let pet = ((mean_temp + 10.0).max(0.5) * 0.016 * config.aridity_evap_scale).max(0.02);
+            let aridity_index = (pet / annual_precip.max(1e-4)) * (0.55 + 0.65 * whc);
+            let aet_ratio = aridity_index / (1.0 + aridity_index * aridity_index).sqrt();
+            let net_rain_runoff = annual_precip * (1.0 - aet_ratio).clamp(0.05, 0.95);
+            let karst_loss = geology.lithology[i].karst_permeability() * 0.25;
+            let raw_runoff = (net_rain_runoff + snowmelt_bonus) * (1.0 - karst_loss);
+            *runoff_out = (raw_runoff * config.runoff_multiplier).max(0.0);
+        });
 
     // =========================================================================
     // 2. ТРАССИРОВКА НАПРАВЛЕНИЙ СТОКА (Priority-Flood + Эродируемость + Меандры)
@@ -201,13 +198,18 @@ pub(super) fn compute_rivers(
     // =========================================================================
     // 3. АККУМУЛЯЦИЯ ПОТОКА (от вершин к океану)
     // =========================================================================
-    for i in 0..num_cells {
-        hydrology.flow_accumulation[i] = if geology.elevations[i] > 0.0 {
-            hydrology.runoff[i] * cell_area
-        } else {
-            0.0
-        };
-    }
+    let runoff = &hydrology.runoff;
+    hydrology
+        .flow_accumulation
+        .par_iter_mut()
+        .enumerate()
+        .for_each(|(i, out)| {
+            *out = if geology.elevations[i] > 0.0 {
+                runoff[i] * cell_area
+            } else {
+                0.0
+            };
+        });
 
     for &u in downstream_order.iter().rev() {
         let flow = hydrology.flow_accumulation[u];
@@ -224,11 +226,21 @@ pub(super) fn compute_rivers(
     // =========================================================================
     let threshold = config.river_threshold.max(1e-6);
 
-    for i in 0..num_cells {
+    let flow_accumulation = &hydrology.flow_accumulation;
+    let water_capacity = &hydrology.water_capacity;
+    let soil_texture = &hydrology.soil_texture;
+    let permeability = &hydrology.permeability;
+
+    hydrology
+        .soil_moisture
+        .par_iter_mut()
+        .zip(hydrology.soils.par_iter_mut())
+        .enumerate()
+        .for_each(|(i, (soil_moisture_out, soil_out))| {
         let elev = geology.elevations[i];
         if elev <= 0.0 {
-            hydrology.soil_moisture[i] = 1.0;
-            continue;
+            *soil_moisture_out = 1.0;
+            return;
         }
 
         let t_spring = climate.spring.temperatures[i];
@@ -242,8 +254,8 @@ pub(super) fn compute_rivers(
         let annual_precip = (2.0 * p_spring + p_summer + p_winter) * 0.25;
 
         // 1. Климатическая влага, удержанная почвой (зависит от осадков, испаряемости PET и влагоемкости WHC)
-        let whc = hydrology.water_capacity[i];
-        let [sand, _silt, clay] = hydrology.soil_texture[i];
+        let whc = water_capacity[i];
+        let [sand, _silt, clay] = soil_texture[i];
         let pet = ((mean_temp + 10.0).max(1.5) * 0.013 * config.aridity_evap_scale).max(0.025);
 
         let retention_mod = 1.0 + (whc - 0.30) * config.soil_biome_influence
@@ -254,7 +266,7 @@ pub(super) fn compute_rivers(
         let rain_soil_moisture = effective_infiltration / (effective_infiltration + pet * 0.7);
 
         // 2. Прямое увлажнение почвы рекой в самой клетке русла
-        let my_flow = hydrology.flow_accumulation[i];
+        let my_flow = flow_accumulation[i];
         let river_ratio = (my_flow / threshold).max(0.0);
         let direct_river_moisture = if river_ratio > 0.25 {
             (0.18 * river_ratio.powf(0.42) * config.river_groundwater_seepage).clamp(0.0, 0.78)
@@ -273,11 +285,11 @@ pub(super) fn compute_rivers(
             }
 
             if n_elev > 0.0 {
-                let n_flow_ratio = (hydrology.flow_accumulation[n_id] / threshold).max(0.0);
+                let n_flow_ratio = (flow_accumulation[n_id] / threshold).max(0.0);
                 let height_above_river = (elev - n_elev).max(0.0);
                 if n_flow_ratio >= 0.8 && height_above_river < 0.022 {
                     let elev_atten = 1.0 - (height_above_river / 0.022);
-                    let perm_factor = 0.45 + 0.55 * hydrology.permeability[i];
+                    let perm_factor = 0.45 + 0.55 * permeability[i];
                     let seep = 0.14
                         * n_flow_ratio.powf(0.38)
                         * elev_atten
@@ -301,17 +313,17 @@ pub(super) fn compute_rivers(
             + lowland_bonus)
             .clamp(0.02, 1.0);
 
-        hydrology.soil_moisture[i] = total_sm;
+        *soil_moisture_out = total_sm;
 
         if total_sm > 0.72
             && elev < 0.15
             && max_slope < 0.012
             && matches!(
-                hydrology.soils[i],
+                *soil_out,
                 SoilType::Aridisol | SoilType::Cambisol | SoilType::Chernozem
             )
         {
-            hydrology.soils[i] = SoilType::Gleysol;
+            *soil_out = SoilType::Gleysol;
         }
-    }
+        });
 }

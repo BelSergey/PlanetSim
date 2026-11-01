@@ -13,8 +13,10 @@ bevy = { version = "0.19.1", default-features = false, features = [
     "bevy_core_pipeline", # Базовый пайплайн камеры Camera3d
     "bevy_render",        # Ядро рендера wgpu
     "bevy_pbr",           # 3D-меши (Mesh3d), материалы (StandardMaterial) и свет (DirectionalLight)
-    "bevy_gizmos",        # 3D-стрелки ветров, течений и ось планеты
+    "bevy_gizmos",        # API для стрелок ветров, течений и оси планеты
+    "bevy_gizmos_render", # Рендер стрелок ветров, течений и оси планеты
     "bevy_state",         # Стейт-машина AppState (MainMenu / InGame)
+    "bevy_picking",       # Блокировка кликов «сквозь» UI, Поддержка «диегетического» UI
     "tonemapping_luts",   # Стандартный тонмаппинг для 3D-сцены (чтобы цвета не искажались)
     "ktx2",               # Нужен для загрузки LUT-текстур тонмаппинга
     "zstd_rust",          # Распаковка ktx2 для тонмаппинга
@@ -42,9 +44,15 @@ lto = "thin"
 codegen-units = 16
 
 [profile.dev.package."*"]
-opt-level = 0
+opt-level = 3
 debug = false
 
 [profile.dev]
-opt-level = 1
+opt-level = 3
 debug = "line-tables-only"
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+panic = "abort"
+opt-level = 3
