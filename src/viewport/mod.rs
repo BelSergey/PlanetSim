@@ -1,12 +1,17 @@
 // src/viewport/mod.rs
 use rayon::prelude::*;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 pub mod camera_3d;
 pub mod hotkeys;
 pub mod mesh_globe;
 
 use crate::astronomy::{AxialRotation, Orbit, Sun, Sunlight};
 use bevy::light::NotShadowCaster;
+
+use mesh_globe::{
+    MeshColorLayout, build_globe_mesh, build_river_mesh, compute_color_layout,
+    recolor_globe_mesh_range, reposition_globe_mesh,
+};
 
 use crate::{
     domains::{
@@ -45,19 +50,16 @@ use camera_3d::{
     SystemInertia, keyboard_zoom, reset_zoom, rotate_system, set_default_camera_zoom, zoom_camera,
 };
 use hotkeys::hotkey_controls;
-use mesh_globe::{
-    build_globe_mesh, build_river_mesh, recolor_globe_mesh_in_place, reposition_globe_mesh,
-};
 
 /// Визуальная поверхность планеты.
 #[derive(Component)]
 pub struct Globe;
+
 /// Корневой объект всей звёздной системы.
-/// Вращение этого объекта поворачивает Солнце, Землю и освещение вместе.
 #[derive(Component)]
 pub struct StarSystemRoot;
 
-/// Режим проекции мира (задел под переключение между 3D-сферой и 2D-картой)
+/// Режим проекции мира (задел под переключение между 3D-сферой и 2D-картой).
 #[derive(Resource, Default, PartialEq, Eq, Clone, Copy)]
 pub enum ViewMode {
     #[default]
@@ -65,7 +67,7 @@ pub enum ViewMode {
     _Flat2D,
 }
 
-/// Активный слой раскраски карты (переключается по клавише Tab или из UI)
+/// Активный слой раскраски карты.
 #[derive(Resource, Default, PartialEq, Eq, Clone, Copy)]
 pub enum MapOverlay {
     #[default]
@@ -84,6 +86,18 @@ pub enum MapOverlay {
     SoilMoisture,
     Biomes,
     Ruggedness,
+}
+
+/// Кэш разметки цветов (offsets + маска стенок).
+/// Перекраска выполняется целиком за 1 кадр — визуальных «скачков» нет.
+#[derive(Default)]
+struct ViewportMeshCache {
+    cached_layout: Option<MeshColorLayout>,
+    /// Последние отправленные в меш цвета, квантованные в u8.
+    /// Квантование важно: Float32 сравнение ловит шум в 1e-7,
+    /// который глаз не видит, но recolor_globe_mesh_range честно перепишет.
+    /// u8 = ровно то, что видно на экране (после тональной компрессии).
+    last_space_colors_u8: Option<Vec<[u8; 4]>>,
 }
 
 #[derive(Component)]
@@ -149,10 +163,8 @@ fn setup_scene(
         ..default()
     });
 
-    // Геометрия Солнца
     let sun_mesh = meshes.add(Sphere::new(1.0).mesh().uv(48, 32));
 
-    // Светящаяся поверхность Солнца
     let sun_material = materials.add(StandardMaterial {
         base_color: Color::srgb(1.0, 0.55, 0.12),
         emissive: LinearRgba::rgb(25.0, 10.0, 1.5),
@@ -167,7 +179,6 @@ fn setup_scene(
         ..default()
     });
 
-    // Общий родитель всей звёздной системы.
     let system_root = commands
         .spawn((
             StarSystemRoot,
@@ -177,9 +188,7 @@ fn setup_scene(
         ))
         .id();
 
-    // Все объекты системы становятся дочерними одного корня.
     commands.entity(system_root).with_children(|system| {
-        // Солнце в центре системы.
         system.spawn((
             Mesh3d(sun_mesh),
             MeshMaterial3d(sun_material),
@@ -189,9 +198,6 @@ fn setup_scene(
             Visibility::Hidden,
         ));
 
-        // Физическая система координат Земли.
-        // Орбита и осевое вращение рассчитываются независимо
-        // от ручного поворота всей системы.
         system
             .spawn((
                 Orbit::earth(),
@@ -200,7 +206,6 @@ fn setup_scene(
                 Visibility::Inherited,
             ))
             .with_children(|parent| {
-                // Поверхность Земли.
                 parent
                     .spawn((
                         Mesh3d::default(),
@@ -210,7 +215,6 @@ fn setup_scene(
                         Visibility::Hidden,
                     ))
                     .with_children(|globe| {
-                        // Реки остаются дочерним объектом поверхности.
                         globe.spawn((
                             Mesh3d::default(),
                             MeshMaterial3d(river_material),
@@ -220,7 +224,6 @@ fn setup_scene(
                     });
             });
 
-        // Солнечный свет также принадлежит общей системе.
         system.spawn((
             DirectionalLight {
                 illuminance: 12000.0,
@@ -232,14 +235,9 @@ fn setup_scene(
         ));
     });
 
-    // Камера остаётся вне системы:
-    // вращение объектов не вращает саму камеру.
     commands.spawn((Camera3d::default(), Transform::from_xyz(0.0, 0.0, 9.5)));
 }
 
-/// Генерирует естественные цвета спутникового режима SpaceView с учетом
-/// динамической смены сезонов, фенологии растений, таяния/намерзания морского льда
-/// и распределения снежного покрова по температуре и влажности.
 pub fn build_space_colors(
     geology: &GeologyLayer,
     climate: &ClimateLayer,
@@ -252,7 +250,7 @@ pub fn build_space_colors(
 
     geology
         .elevations
-        .par_iter() // ← было .iter()
+        .par_iter()
         .enumerate()
         .map(|(i, &h)| {
             let temp = climate.temperatures.get(i).copied().unwrap_or(15.0);
@@ -261,54 +259,38 @@ pub fn build_space_colors(
             let biome = hydrology.biomes.get(i).copied().unwrap_or(Biome::DeepOcean);
 
             if h <= 0.0 {
-                // ==========================================
-                // 1. ОКЕАН И ДИНАМИЧЕСКИЙ МОРСКОЙ ЛЕД
-                // ==========================================
                 render_ocean_pixel(h, temp, biome)
             } else {
-                // ==========================================
-                // 2. СУША, ФЕНОЛОГИЯ И СЕЗОННЫЙ СНЕГ
-                // ==========================================
                 render_land_pixel(h, temp, humidity, precip, biome)
             }
         })
         .collect()
 }
 
-/// Расчет цвета водной глади и сезонного ледового покрова океана
 #[inline]
 fn render_ocean_pixel(h: f32, temp: f32, biome: Biome) -> [f32; 4] {
-    // Базовый цвет открытой воды с зависимостью от батиметрии (глубины)
     let depth = (h / -0.35).clamp(0.0, 1.0);
     let water_r = 0.015 + (1.0 - depth) * 0.04;
     let water_g = 0.080 + (1.0 - depth) * 0.16;
     let water_b = 0.220 + (1.0 - depth) * 0.22;
 
-    // Оцениваем степень оледенения воды.
-    // Морская вода начинает замерзать при ~ -1.8°C, при -8°C это сплошной паковый лед.
     let freeze_factor = ((-1.5 - temp) / 6.5).clamp(0.0, 1.0);
 
-    // Учитываем базовую полярную шапку: если это Biome::SeaIce, лед тает только при хорошем прогреве летом
     let sea_ice_amount = if biome == Biome::SeaIce {
         if temp > 2.0 {
-            // Летнее таяние кромки полярных льдов
             (1.0 - (temp - 2.0) * 0.25).clamp(0.15, 1.0)
         } else {
             1.0
         }
     } else {
-        // Динамическое зимнее замерзание не-полярных морей
-        freeze_factor * freeze_factor * (3.0 - 2.0 * freeze_factor) // smoothstep
+        freeze_factor * freeze_factor * (3.0 - 2.0 * freeze_factor)
     };
 
     if sea_ice_amount <= 0.001 {
-        // Чистая вода
         Color::srgb(water_r, water_g, water_b)
             .to_linear()
             .to_f32_array()
     } else {
-        // Морской лед имеет легкий бирюзово-голубой оттенок у кромки воды (таяние/шуга)
-        // и белый с холодным синим отблеском в толще пака
         let ice_r = 0.82 + 0.12 * sea_ice_amount;
         let ice_g = 0.90 + 0.07 * sea_ice_amount;
         let ice_b = 0.96 + 0.04 * sea_ice_amount;
@@ -321,18 +303,14 @@ fn render_ocean_pixel(h: f32, temp: f32, biome: Biome) -> [f32; 4] {
     }
 }
 
-/// Расчет цвета суши с учетом фенологии, увядания листвы и снежного покрова
 #[inline]
 fn render_land_pixel(h: f32, temp: f32, humidity: f32, precip: f32, biome: Biome) -> [f32; 4] {
     let (mut base_r, mut base_g, mut base_b, _) = biome_satellite_rgb(biome);
 
-    // --- А. Сезонная фенология растений (Осень / Зима / Засуха) ---
     match biome {
         Biome::TemperateDeciduousForest => {
-            // При остывании ниже +12°C листва желтеет, при остывании ниже +3°C буреет и опадает
             if temp < 12.0 {
                 let autumn = ((12.0 - temp) / 9.0).clamp(0.0, 1.0);
-                // Смешиваем летнюю зелень с золотисто-охристым и древесно-серым цветом ветвей
                 let fall_r = 0.42 * (1.0 - autumn * 0.4) + 0.28 * (autumn * 0.4);
                 let fall_g = 0.32 * (1.0 - autumn * 0.7) + 0.18 * (autumn * 0.7);
                 let fall_b = 0.12 * (1.0 - autumn * 0.5) + 0.14 * (autumn * 0.5);
@@ -343,7 +321,6 @@ fn render_land_pixel(h: f32, temp: f32, humidity: f32, precip: f32, biome: Biome
             }
         }
         Biome::TemperateGrassland | Biome::Savanna => {
-            // При падении температуры или засухе трава выгорает в солому
             let dryness = (1.0 - humidity).clamp(0.0, 1.0);
             let coldness = ((10.0 - temp) / 12.0).clamp(0.0, 1.0);
             let dry_factor = dryness.max(coldness) * 0.65;
@@ -359,22 +336,19 @@ fn render_land_pixel(h: f32, temp: f32, humidity: f32, precip: f32, biome: Biome
         _ => {}
     }
 
-    // --- Б. Сезонный снежный покров ---
     let snow_cover = calculate_snow_cover(temp, humidity, precip, biome);
 
-    // В густых лесах заснеженность не перекрывает кроны полностью
     let max_visual_snow = match biome {
-        Biome::BorealTaiga => 0.62, // Заснеженные ели с темными тенями в ветвях
+        Biome::BorealTaiga => 0.62,
         Biome::TemperateRainforest => 0.55,
         Biome::TropicalRainforest => 0.0,
         Biome::TropicalSeasonalForest => 0.0,
-        Biome::TemperateDeciduousForest => 0.85, // Облетевшие ветви пропускают снег к земле
-        _ => 0.98,                               // Открытые тундры, поля, пустыни, ледники
+        Biome::TemperateDeciduousForest => 0.85,
+        _ => 0.98,
     };
 
     let effective_snow = (snow_cover * max_visual_snow).clamp(0.0, 1.0);
 
-    // Снег в горах и равнинах имеет легкий синеватый оттенок рассеянного света неба
     let snow_r = 0.94;
     let snow_g = 0.97;
     let snow_b = 1.00;
@@ -383,7 +357,6 @@ fn render_land_pixel(h: f32, temp: f32, humidity: f32, precip: f32, biome: Biome
     let mut g = base_g * (1.0 - effective_snow) + snow_g * effective_snow;
     let mut b = base_b * (1.0 - effective_snow) + snow_b * effective_snow;
 
-    // --- В. Высотное тонирование (легкое затенение впадин / осветление пиков) ---
     let elev_shade = (1.0 - (h - 0.10).max(0.0) * 0.35).clamp(0.75, 1.0);
     r *= elev_shade;
     g *= elev_shade;
@@ -392,26 +365,20 @@ fn render_land_pixel(h: f32, temp: f32, humidity: f32, precip: f32, biome: Biome
     Color::srgb(r, g, b).to_linear().to_f32_array()
 }
 
-/// Расчет локальной толщины снежного покрова [0.0 .. 1.0]
 #[inline]
 fn calculate_snow_cover(temp: f32, humidity: f32, precip: f32, biome: Biome) -> f32 {
-    // Вечные ледники покрыты снегом всегда
     if biome == Biome::IceSheet {
         return 1.0;
     }
 
-    // 1. Доля осадков, выпадающих в виде снега при текущей температуре
     let temp_snow_potential = ClimateLayer::snow_fraction(temp);
 
     if temp_snow_potential <= 0.001 {
         return 0.0;
     }
 
-    // 2. Доступность влаги (отсекает снег в сухих континентальных котловинах)
     let moisture_availability = (humidity * 0.65 + precip * 1.8).clamp(0.12, 1.0);
 
-    // 3. Устойчивость снега при сильных морозах (даже при низкой текущей влажности
-    // ранее выпавший снег не тает при глубоком минусе)
     let subzero_persistence = if temp < -6.0 {
         ((-6.0 - temp) / 10.0).clamp(0.0, 0.45)
     } else {
@@ -432,21 +399,18 @@ fn sync_viewport_mesh(
     hydrology_config: Res<HydrologyConfig>,
     overlay: Res<MapOverlay>,
     view_config: Res<ViewportViewConfig>,
-    mut globe_query: Query<(&mut Mesh3d, &mut Transform), (With<Globe>, Without<RiverOverlayMesh>)>,
+    mut globe_query: Query<&mut Mesh3d, (With<Globe>, Without<RiverOverlayMesh>)>,
     mut river_query: Query<
         (&mut Mesh3d, &mut Visibility),
         (With<RiverOverlayMesh>, Without<Globe>),
     >,
     mut meshes: ResMut<Assets<Mesh>>,
-    // Задерживает удаление старых мешей на 1 кадр.
     mut deferred_mesh_drops: Local<Vec<Handle<Mesh>>>,
-    // Радиус, под который в последний раз была построена геометрия.
-    mut mesh_base_radius: Local<Option<f32>>,
-    // Последнее применённое значение слайдера.
-    mut last_radius: Local<Option<f32>>,
+    mut viewport_cache: Local<ViewportMeshCache>,
 ) {
     deferred_mesh_drops.clear();
 
+    // Видимость рек.
     if let Ok((_, mut river_vis)) = river_query.single_mut() {
         let target_vis = if view_config.show_rivers && !hydrology.flow_accumulation.is_empty() {
             Visibility::Inherited
@@ -462,15 +426,21 @@ fn sync_viewport_mesh(
         return;
     }
 
-    // Временная диагностика микрофризов
-    let perf_total = Instant::now();
+    if !pipeline.rebuild_mesh
+        && !pipeline.reposition_mesh
+        && !pipeline.recolor_mesh
+        && !pipeline.rebuild_rivers
+    {
+        return;
+    }
 
-    let mut perf_colors = Duration::ZERO;
-    let mut perf_recolor = Duration::ZERO;
-    let mut perf_mesh_build = Duration::ZERO;
-    let mut perf_reposition = Duration::ZERO;
-    let mut perf_insert = Duration::ZERO;
-    let mut perf_rivers = Duration::ZERO;
+    let perf_total = Instant::now();
+    let mut perf_colors = std::time::Duration::ZERO;
+    let mut perf_recolor = std::time::Duration::ZERO;
+    let mut perf_mesh_build = std::time::Duration::ZERO;
+    let mut perf_reposition = std::time::Duration::ZERO;
+    let mut perf_insert = std::time::Duration::ZERO;
+    let mut perf_rivers = std::time::Duration::ZERO;
 
     let perf_flags = (
         pipeline.rebuild_mesh,
@@ -479,53 +449,34 @@ fn sync_viewport_mesh(
         pipeline.rebuild_rivers,
     );
 
-    let radius = world_config.radius.max(0.001);
-    let radius_changed = last_radius.is_none_or(|last| (last - radius).abs() > 1e-5);
-    if !pipeline.rebuild_mesh
-        && !pipeline.reposition_mesh
-        && !pipeline.recolor_mesh
-        && !pipeline.rebuild_rivers
-        && !radius_changed
-    {
-        return;
-    }
-
-    // Полная перестройка или изменение формы воды запекает текущий радиус в вершины.
-    // Обычное изменение радиуса масштабирует готовый Globe вместе с дочерними реками.
-    let geometry_rebuilt = pipeline.rebuild_mesh || pipeline.reposition_mesh;
-    let base_radius = if geometry_rebuilt {
-        radius
-    } else {
-        mesh_base_radius.unwrap_or(radius).max(0.001)
-    };
-
-    // 1. Обновление меша глобуса.
-    if let Ok((mut mesh_handle, mut globe_transform)) = globe_query.single_mut() {
+    // ── 1. Обновление меша глобуса ─────────────────────────────────────
+    if let Ok(mut mesh_handle) = globe_query.single_mut() {
         if pipeline.rebuild_mesh {
-            let timer = Instant::now();
-            let colors = compute_overlay_colors(&overlay, &geology, &climate, &hydrology);
-            perf_colors += timer.elapsed();
-            let timer = Instant::now();
+    let timer = Instant::now();
+    let colors = compute_overlay_colors(&overlay, &geology, &climate, &hydrology);
+    perf_colors += timer.elapsed();
 
-            let new_mesh = build_globe_mesh(
-                &topology,
-                &geology.elevations,
-                view_config.flat_water,
-                &colors,
-                world_config.radius,
-                world_config.system_scale(),
-            );
+    let new_mesh = build_globe_mesh(
+        &topology,
+        &geology.elevations,
+        view_config.flat_water,
+        &colors,
+        world_config.radius,
+        world_config.system_scale(),
+    );
+    perf_mesh_build += timer.elapsed();
 
-            perf_mesh_build += timer.elapsed();
-            deferred_mesh_drops.push(mesh_handle.0.clone());
-            mesh_handle.0 = meshes.add(new_mesh);
-            if globe_transform.scale != Vec3::ONE {
-                globe_transform.scale = Vec3::ONE;
-            }
-        } else {
+    deferred_mesh_drops.push(mesh_handle.0.clone());
+    mesh_handle.0 = meshes.add(new_mesh);
+
+    viewport_cache.cached_layout =
+        Some(compute_color_layout(&topology, &geology.elevations));
+
+    pipeline.recolor_mesh = false;
+} else {
+            // Быстрое обновление позиций (изменение формы воды / радиуса).
             if pipeline.reposition_mesh {
                 let timer = Instant::now();
-
                 let new_positions = reposition_globe_mesh(
                     &topology,
                     &geology.elevations,
@@ -533,64 +484,134 @@ fn sync_viewport_mesh(
                     world_config.radius,
                     world_config.system_scale(),
                 );
-
                 perf_reposition += timer.elapsed();
+
                 if let Some(mut mesh) = meshes.get_mut(&mesh_handle.0) {
+                    let timer = Instant::now();
                     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, new_positions);
+                    perf_insert += timer.elapsed();
                 }
-                if globe_transform.scale != Vec3::ONE {
-                    globe_transform.scale = Vec3::ONE;
-                }
-            } else {
-                // Globe — родитель речного меша, поэтому масштабируются оба объекта.
-                // Отношение сохраняет радиус и высоту рельефа в тех же пропорциях.
-                let target_scale = Vec3::splat(radius / base_radius);
-                if globe_transform.scale != target_scale {
-                    globe_transform.scale = target_scale;
-                }
+
+                // Разметка вершин не меняется при reposition — cached_layout остаётся валидным.
             }
 
-            if pipeline.recolor_mesh {
-                let overlay_needs_recolor = matches!(
-                    *overlay,
-                    MapOverlay::SpaceView
-                        | MapOverlay::Temperature
-                        | MapOverlay::Humidity
-                        | MapOverlay::Precipitation
-                        | MapOverlay::Albedo
-                        | MapOverlay::Pressure
-                        | MapOverlay::Winds
-                );
-                if overlay_needs_recolor {
-                    if let Some(mut mesh) = meshes.get_mut(&mesh_handle.0) {
-                        let timer = Instant::now();
-                        let colors =
-                            compute_overlay_colors(&overlay, &geology, &climate, &hydrology);
-                        perf_colors += timer.elapsed();
-                        let timer = Instant::now();
+            // Мгновенная перекраска за ОДИН кадр.
+            let overlay_needs_recolor = matches!(
+                *overlay,
+                MapOverlay::SpaceView
+                    | MapOverlay::Temperature
+                    | MapOverlay::Humidity
+                    | MapOverlay::Precipitation
+                    | MapOverlay::Albedo
+                    | MapOverlay::Pressure
+                    | MapOverlay::Winds
+            );
 
-                        recolor_globe_mesh_in_place(
+if pipeline.recolor_mesh && overlay_needs_recolor {
+    let t0 = Instant::now();
+    let new_colors_f32 = compute_overlay_colors(&overlay, &geology, &climate, &hydrology);
+    let colors_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+    let t1 = Instant::now();
+
+    // Спец‑путь: только для SpaceView, потому что только он меняется от сезона
+    if *overlay == MapOverlay::SpaceView {
+        let total = topology.cells.len();
+        let new_u8: Vec<[u8; 4]> = new_colors_f32
+            .iter()
+            .map(|c| [
+                (c[0].clamp(0.0, 1.0) * 255.0).round() as u8,
+                (c[1].clamp(0.0, 1.0) * 255.0).round() as u8,
+                (c[2].clamp(0.0, 1.0) * 255.0).round() as u8,
+                (c[3].clamp(0.0, 1.0) * 255.0).round() as u8,
+            ])
+            .collect();
+
+        if let Some(layout) = &viewport_cache.cached_layout
+            && let Some(mut mesh) = meshes.get_mut(&mesh_handle.0)
+        {
+            match viewport_cache.last_space_colors_u8.as_ref() {
+                Some(old_u8) if old_u8.len() == total => {
+                    // Сравниваем и строим маску
+                    let mut dirty = vec![false; total];
+                    let mut dirty_count = 0usize;
+                    for i in 0..total {
+                        if old_u8[i] != new_u8[i] {
+                            dirty[i] = true;
+                            dirty_count += 1;
+                        }
+                    }
+
+                    if dirty_count > 0 {
+                        recolor_globe_mesh_range(
                             &mut mesh,
                             &topology,
-                            &geology.elevations,
-                            &colors,
+                            &new_colors_f32,
+                            layout,
+                            0,
+                            total,
+                            Some(&dirty),
                         );
-
-                        perf_recolor += timer.elapsed();
                     }
+
+                    info!(
+                        "[RECOLOR DIRTY] {}/{} cells changed ({:.1}%)",
+                        dirty_count,
+                        total,
+                        100.0 * dirty_count as f32 / total as f32
+                    );
+                }
+                _ => {
+                    // Первый раз или размер сетки сменился — перекрашиваем всё
+                    recolor_globe_mesh_range(
+                        &mut mesh,
+                        &topology,
+                        &new_colors_f32,
+                        layout,
+                        0,
+                        total,
+                        None,
+                    );
                 }
             }
         }
-        *mesh_base_radius = Some(base_radius);
+
+        viewport_cache.last_space_colors_u8 = Some(new_u8);
+    } else {
+        // Остальные слои меняются только явно (клик в UI/хоткей) — перекрашиваем всё
+        if let Some(layout) = &viewport_cache.cached_layout
+            && let Some(mut mesh) = meshes.get_mut(&mesh_handle.0)
+        {
+            let total = topology.cells.len();
+            recolor_globe_mesh_range(
+                &mut mesh,
+                &topology,
+                &new_colors_f32,
+                layout,
+                0,
+                total,
+                None,
+            );
+        }
+        // Инвалидируем кэш SpaceView, чтобы следующий перекрас был полным
+        viewport_cache.last_space_colors_u8 = None;
     }
 
-    // 2. Пересборка речной сети. Если основной меш не перестраивался,
-    // строим реки в базовом радиусе: масштабирует их родительский Globe.
+    let write_ms = t1.elapsed().as_secs_f64() * 1000.0;
+info!(
+    "[RECOLOR SPLIT] colors={:.2}ms, write={:.2}ms",
+    colors_ms, write_ms
+);
+
+    pipeline.recolor_mesh = false;
+}
+}
+    }
+
+    // ── 2. Пересборка меша рек ─────────────────────────────────────────
     if pipeline.rebuild_mesh || pipeline.reposition_mesh || pipeline.rebuild_rivers {
         if let Ok((mut river_mesh_handle, _)) = river_query.single_mut() {
-            let river_height_scale = base_radius / world_config.reference_system_radius.max(0.001);
             let timer = Instant::now();
-
             let new_river_mesh = build_river_mesh(
                 &topology,
                 &geology,
@@ -600,18 +621,19 @@ fn sync_viewport_mesh(
                 world_config.radius,
                 world_config.system_scale(),
             );
-
             perf_rivers += timer.elapsed();
+
             deferred_mesh_drops.push(river_mesh_handle.0.clone());
             river_mesh_handle.0 = meshes.add(new_river_mesh);
         }
     }
 
-    *last_radius = Some(radius);
+    // Сбрасываем только те флаги, что гарантированно отработаны в этом кадре.
     pipeline.rebuild_mesh = false;
     pipeline.reposition_mesh = false;
-    pipeline.recolor_mesh = false;
     pipeline.rebuild_rivers = false;
+    // recolor_mesh уже сброшен внутри своей секции при успешной обработке.
+
     info!(
         "[VIEWPORT PERF] total={:.2}ms | colors={:.2}ms | recolor={:.2}ms | insert={:.2}ms | mesh_build={:.2}ms | reposition={:.2}ms | rivers={:.2}ms | flags={:?}",
         perf_total.elapsed().as_secs_f64() * 1000.0,
@@ -623,6 +645,10 @@ fn sync_viewport_mesh(
         perf_rivers.as_secs_f64() * 1000.0,
         perf_flags,
     );
+    // в конце sync_viewport_mesh — вернуть безусловный сброс:
+viewport_cache.cached_layout = Some(compute_color_layout(&topology, &geology.elevations));
+    viewport_cache.last_space_colors_u8 = None;   // ← добавить
+    pipeline.recolor_mesh = false;
 }
 
 fn compute_overlay_colors(
@@ -665,10 +691,8 @@ pub fn draw_axis_and_equator_gizmos(
     };
 
     let globe_transform = global_transform.compute_transform();
-
     let radius = world_config.radius;
 
-    // 1. Рисуем ось вращения (от Южного полюса к Северному)
     let local_top = Vec3::Y * (radius + 1.0);
     let local_bottom = Vec3::NEG_Y * (radius + 1.0);
 
@@ -677,10 +701,7 @@ pub fn draw_axis_and_equator_gizmos(
 
     gizmos.arrow(world_bottom, world_top, Color::srgba(1.0, 0.2, 0.2, 0.9));
 
-    // 2. Рисуем Экватор
     let equator_radius = radius + 0.05;
-
-    // Поворачиваем плоскость круга (по умолчанию XY) на -90 градусов по X, чтобы получить экватор (XZ)
     let equator_rotation =
         globe_transform.rotation * Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
 

@@ -46,10 +46,9 @@ pub fn update_dynamic_seasonal_climate(
     time: Res<Time>,
     mut config: ResMut<ClimateConfig>,
     mut climate: ResMut<ClimateLayer>,
-    mut pipeline: ResMut<WorldPipeline>,
+    mut pipeline: ResMut<WorldPipeline>,      // ← снова нужен
     mut last_factor: Local<f32>,
     mut interpolate_cooldown: Local<f32>,
-    mut recolor_cooldown: Local<f32>,
 ) {
     if clock.paused || climate.spring.temperatures.is_empty() {
         return;
@@ -57,23 +56,20 @@ pub fn update_dynamic_seasonal_climate(
 
     let dt = time.delta_secs();
     *interpolate_cooldown += dt;
-    *recolor_cooldown += dt;
 
-    // Триггер — изменение сезонного фактора
     if (season_state.season_factor - *last_factor).abs() < 0.015 {
         return;
     }
-
-    // Не чаще ~12 Гц (визуально гладко, но не тратит CPU на каждый кадр)
     if *interpolate_cooldown < 0.08 {
         return;
     }
     *interpolate_cooldown = 0.0;
     *last_factor = season_state.season_factor;
 
+    // Данные климата продолжают плавно интерполироваться (температуры, давления, ветра).
     climate.interpolate_from_orbit(season_state.season_factor);
 
-    config.active_season = if season_state.season_factor > 0.45 {
+    let new_season = if season_state.season_factor > 0.45 {
         ClimateSeason::Summer
     } else if season_state.season_factor < -0.45 {
         ClimateSeason::Winter
@@ -81,10 +77,9 @@ pub fn update_dynamic_seasonal_climate(
         ClimateSeason::Spring
     };
 
-    // Флаг реколора ставим не чаще ~7 Гц.
-    // Реальную фильтрацию по типу оверлея делает viewport (см. ниже).
-    if *recolor_cooldown > 2.0 {
-        *recolor_cooldown = 0.0;
+    // А вот цвета вершин обновляем ТОЛЬКО на переходе сезона.
+    if new_season != config.active_season {
+        config.active_season = new_season;
         pipeline.recolor_mesh = true;
     }
 }

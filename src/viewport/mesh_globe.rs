@@ -1,4 +1,5 @@
 // src/viewport/mesh_globe.rs
+
 use rayon::prelude::*;
 
 use crate::world::topology::WorldTopology;
@@ -98,11 +99,11 @@ pub fn build_globe_mesh(
                 }
 
                 let wall_color = [
-                    top_color[0] * 0.75,
-                    top_color[1] * 0.75,
-                    top_color[2] * 0.75,
-                    top_color[3],
-                ];
+        top_color[0] * 0.75,
+        top_color[1] * 0.75,
+        top_color[2] * 0.75,
+        top_color[3],
+    ];
 
                 for k in 0..n_corners {
                     let neighbor_id = cell.neighbors[k];
@@ -170,55 +171,10 @@ pub fn build_globe_mesh(
     );
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
+mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
+
     mesh.insert_indices(Indices::U32(indices));
     mesh
-}
-
-#[allow(dead_code)]
-pub fn recolor_globe_mesh(
-    topology: &WorldTopology,
-    elevations: &[f32],
-    cell_colors: &[[f32; 4]],
-) -> Vec<[f32; 4]> {
-    // 1. Параллельно считаем цвета каждой клетки в отдельный маленький Vec.
-    let per_cell: Vec<Vec<[f32; 4]>> = topology
-        .cells
-        .par_iter()
-        .enumerate()
-        .map(|(cell_id, cell)| {
-            let h = elevations[cell_id];
-            let top_color = cell_colors[cell_id];
-            let n_corners = cell.corners.len();
-
-            let wall_color = [
-                top_color[0] * 0.75,
-                top_color[1] * 0.75,
-                top_color[2] * 0.75,
-                top_color[3],
-            ];
-
-            let mut local: Vec<[f32; 4]> = Vec::with_capacity(1 + n_corners + 4 * n_corners);
-
-            local.push(top_color); // центр
-            local.extend(std::iter::repeat_n(top_color, n_corners)); // углы
-            for k in 0..n_corners {
-                if h > elevations[cell.neighbors[k]] {
-                    // отвесные стены
-                    local.extend_from_slice(&[wall_color; 4]);
-                }
-            }
-            local
-        })
-        .collect();
-
-    // 2. Плоский буфер: заранее знаем размер, конкатенация в один проход.
-    let total_len: usize = per_cell.iter().map(Vec::len).sum();
-    let mut out = Vec::with_capacity(total_len);
-    for chunk in per_cell {
-        out.extend_from_slice(&chunk);
-    }
-    out
 }
 
 pub fn reposition_globe_mesh(
@@ -626,116 +582,130 @@ fn push_center_hub(
     }
 }
 
-pub fn recolor_globe_mesh_in_place(
+// Структура, которая хранит разметку цветов и маску стенок
+pub struct MeshColorLayout {
+    pub offsets: Vec<usize>,
+    pub wall_masks: Vec<u32>,
+}
+
+pub fn compute_color_layout(topology: &WorldTopology, elevations: &[f32]) -> MeshColorLayout {
+    let cells = &topology.cells;
+    let mut offsets = Vec::with_capacity(cells.len() + 1);
+    let mut wall_masks = Vec::with_capacity(cells.len());
+    offsets.push(0usize);
+
+    let mut total = 0usize;
+
+    for (cell_id, cell) in cells.iter().enumerate() {
+        let h = elevations[cell_id];
+        let mut wall_count = 0usize;
+        let mut mask = 0u32;
+
+        for k in 0..cell.corners.len() {
+            if h > elevations[cell.neighbors[k]] {
+                wall_count += 1;
+                mask |= 1 << k; // Запоминаем, что стенка k существует
+            }
+        }
+
+        wall_masks.push(mask);
+        total += 1 + cell.corners.len() + wall_count * 4;
+        offsets.push(total);
+    }
+
+    MeshColorLayout {
+        offsets,
+        wall_masks,
+    }
+}
+
+pub fn recolor_globe_mesh_range(
     mesh: &mut Mesh,
     topology: &WorldTopology,
-    elevations: &[f32],
     cell_colors: &[[f32; 4]],
+    layout: &MeshColorLayout,
+    start_cell: usize,
+    end_cell: usize,
+    dirty_mask: Option<&[bool]>,   // ← новый параметр
 ) {
     let Some(VertexAttributeValues::Float32x4(colors)) =
         mesh.attribute_mut(Mesh::ATTRIBUTE_COLOR)
     else {
         return;
     };
-
     let cells = &topology.cells;
+    let offsets = &layout.offsets;
+    let wall_masks = &layout.wall_masks;
 
-    // 1. Вычисляем границы цветовых данных каждой ячейки.
-    let mut offsets = Vec::with_capacity(cells.len() + 1);
-    offsets.push(0usize);
-
-    let mut total_vertices = 0usize;
-
-    for (cell_id, cell) in cells.iter().enumerate() {
-        let h = elevations[cell_id];
-
-        let mut wall_count = 0usize;
-
-        for k in 0..cell.corners.len() {
-            if h > elevations[cell.neighbors[k]] {
-                wall_count += 1;
-            }
-        }
-
-        total_vertices += 1 + cell.corners.len() + wall_count * 4;
-        offsets.push(total_vertices);
-    }
-
-    // Защита от несовпадения структуры меша.
-    if total_vertices != colors.len() {
-        warn!(
-            "[VIEWPORT] Color buffer mismatch: expected {}, actual {}",
-            total_vertices,
-            colors.len()
-        );
+    if start_cell >= end_cell || end_cell > cells.len() || offsets.len() != cells.len() + 1 {
         return;
     }
 
-    // 2. Разделяем буфер на независимые группы ячеек.
-    const CELLS_PER_TASK: usize = 256;
+    let v_start = offsets[start_cell];
+    let v_end = offsets[end_cell];
 
-    let mut remaining = colors.as_mut_slice();
+    if v_end > colors.len() || v_start > v_end {
+        return;
+    }
 
-    let mut tasks = Vec::with_capacity(
-        (cells.len() + CELLS_PER_TASK - 1) / CELLS_PER_TASK,
-    );
+    let colors_range = &mut colors[v_start..v_end];
 
-    for start_cell in (0..cells.len()).step_by(CELLS_PER_TASK) {
-        let end_cell = (start_cell + CELLS_PER_TASK).min(cells.len());
+    const CELLS_PER_TASK: usize = 1024; // Увеличили чанк для меньшега оверхеда Rayon
 
-        let start_vertex = offsets[start_cell];
-        let end_vertex = offsets[end_cell];
+    let mut tasks =
+        Vec::with_capacity((end_cell - start_cell + CELLS_PER_TASK - 1) / CELLS_PER_TASK);
 
-        let (task_colors, rest) =
-            remaining.split_at_mut(end_vertex - start_vertex);
+    let mut remaining = colors_range;
 
-        tasks.push((
-            start_cell,
-            end_cell,
-            start_vertex,
-            task_colors,
-        ));
+    for chunk_start in (start_cell..end_cell).step_by(CELLS_PER_TASK) {
+        let chunk_end = (chunk_start + CELLS_PER_TASK).min(end_cell);
+        let local_v_start = offsets[chunk_start] - v_start;
+        let local_v_end = offsets[chunk_end] - v_start;
 
+        let (chunk_buf, rest) = remaining.split_at_mut(local_v_end - local_v_start);
+        tasks.push((chunk_start, chunk_end, local_v_start, chunk_buf));
         remaining = rest;
     }
 
-    // 3. Перекрашиваем группы параллельно.
-    tasks.into_par_iter().for_each(
-        |(start_cell, end_cell, base_vertex, task_colors)| {
-            for cell_id in start_cell..end_cell {
+    tasks
+        .into_par_iter()
+        .for_each(|(cs, ce, local_v_start, buf)| {
+            for cell_id in cs..ce {
+                if let Some(mask) = dirty_mask {
+                    if !mask[cell_id] {
+                        continue;
+                    }
+                } 
+                
                 let cell = &cells[cell_id];
-                let h = elevations[cell_id];
-
-                let local_start = offsets[cell_id] - base_vertex;
+                let local_start = offsets[cell_id] - v_start - local_v_start;
                 let cell_len = offsets[cell_id + 1] - offsets[cell_id];
-
-                let cell_buffer =
-                    &mut task_colors[local_start..local_start + cell_len];
+                let cell_buf = &mut buf[local_start..local_start + cell_len];
 
                 let top_color = cell_colors[cell_id];
 
-                let wall_color = [
-                    top_color[0] * 0.75,
-                    top_color[1] * 0.75,
-                    top_color[2] * 0.75,
-                    top_color[3],
-                ];
+let wall_color = [
+        top_color[0] * 0.75,
+        top_color[1] * 0.75,
+        top_color[2] * 0.75,
+        top_color[3],
+    ];
 
                 // Центр и верхние углы.
                 let top_vertices = 1 + cell.corners.len();
 
-                cell_buffer[..top_vertices].fill(top_color);
+                cell_buf[..top_vertices].fill(top_color);
 
-                // Боковые стенки.
+                // Благодаря маске, мы просто читаем биты, а не прыгаем по памяти в elevations
+                let mask = wall_masks[cell_id];
                 let mut offset = top_vertices;
 
                 for k in 0..cell.corners.len() {
-                    if h > elevations[cell.neighbors[k]] {
-                        cell_buffer[offset..offset + 4].fill(wall_color);
+                    if (mask & (1 << k)) != 0 {
+                        cell_buf[offset..offset + 4].fill(wall_color);
                         offset += 4;
                     }
                 }
             }
-        },
-    );
+        });
 }
