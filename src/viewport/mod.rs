@@ -646,8 +646,6 @@ info!(
         perf_flags,
     );
     // в конце sync_viewport_mesh — вернуть безусловный сброс:
-viewport_cache.cached_layout = Some(compute_color_layout(&topology, &geology.elevations));
-    viewport_cache.last_space_colors_u8 = None;   // ← добавить
     pipeline.recolor_mesh = false;
 }
 
