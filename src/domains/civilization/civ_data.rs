@@ -9,7 +9,7 @@ pub const NUM_SOC_LAYERS: usize = 7;
 /// Количество 64-битных слов в битовом поле прогресса/идей.
 /// 2 слова = 128 бит (чтобы расширить до 256 бит, достаточно поменять 2 на 4).
 pub const IDEA_WORDS: usize = 2;
-pub const TOTAL_IDEA_BITS: usize = IDEA_WORDS * 64;
+//pub const TOTAL_IDEA_BITS: usize = IDEA_WORDS * 64;
 
 /// Смысловая разметка битов в первом слове (биты 0..63):
 /// 0..3   (4 бита)  — 4 столпа продовольствия (Foraging, Fishery, Pastoral, Arable)
@@ -51,14 +51,14 @@ impl IdeaBits {
         }
     }
 
-    #[inline]
-    pub fn clear_bit(&mut self, bit: usize) {
-        let word = bit >> 6;
-        let offset = bit & 63;
-        if word < IDEA_WORDS {
-            self.0[word] &= !(1u64 << offset);
-        }
-    }
+    // #[inline]
+    // pub fn clear_bit(&mut self, bit: usize) {
+    //     let word = bit >> 6;
+    //     let offset = bit & 63;
+    //     if word < IDEA_WORDS {
+    //         self.0[word] &= !(1u64 << offset);
+    //     }
+    // }
 
     #[inline]
     pub fn bitor(mut self, other: Self) -> Self {
@@ -68,13 +68,13 @@ impl IdeaBits {
         self
     }
 
-    #[inline]
-    pub fn bitand(mut self, other: Self) -> Self {
-        for i in 0..IDEA_WORDS {
-            self.0[i] &= other.0[i];
-        }
-        self
-    }
+    // #[inline]
+    // pub fn bitand(mut self, other: Self) -> Self {
+    //     for i in 0..IDEA_WORDS {
+    //         self.0[i] &= other.0[i];
+    //     }
+    //     self
+    // }
 
     #[inline]
     pub fn difference(mut self, other: Self) -> Self {
@@ -84,14 +84,14 @@ impl IdeaBits {
         self
     }
 
-    #[inline]
-    pub fn count_ones(&self) -> u32 {
-        let mut total = 0;
-        for i in 0..IDEA_WORDS {
-            total += self.0[i].count_ones();
-        }
-        total
-    }
+    // #[inline]
+    // pub fn count_ones(&self) -> u32 {
+    //     let mut total = 0;
+    //     for i in 0..IDEA_WORDS {
+    //         total += self.0[i].count_ones();
+    //     }
+    //     total
+    // }
 
     /// Количество открытых функциональных битов (без учета случайных битов ДНК 52..63)
     #[inline]

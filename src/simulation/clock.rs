@@ -44,9 +44,9 @@ impl SimulationClock {
         }
     }
 
-    pub fn set_speed(&mut self, seconds_per_real_second: f64) {
-        self.time_scale = seconds_per_real_second.max(0.0);
-    }
+    // pub fn set_speed(&mut self, seconds_per_real_second: f64) {
+    //     self.time_scale = seconds_per_real_second.max(0.0);
+    // }
 
     pub fn pause(&mut self) {
         self.paused = true;

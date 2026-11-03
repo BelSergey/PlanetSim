@@ -353,11 +353,11 @@ impl ClimateSolverCache {
         }
     }
 
-    /// Явно сбрасывает `SolverPrecalc`. Вызывайте, если изменились
-    /// `topology`, `geology.continentality`, `geology.elevations` или `config`.
-    pub fn invalidate_precalc(&mut self) {
-        self.precalc = None;
-    }
+    // Явно сбрасывает `SolverPrecalc`. Вызывайте, если изменились
+    // `topology`, `geology.continentality`, `geology.elevations` или `config`.
+    // pub fn invalidate_precalc(&mut self) {
+    //     self.precalc = None;
+    // }
 }
 
 impl Default for ClimateSolverCache {
