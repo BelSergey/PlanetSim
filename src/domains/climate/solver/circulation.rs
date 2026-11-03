@@ -25,6 +25,8 @@ pub(super) fn compute_season_pressure_and_winds(
     snap: &mut SeasonalSnapshot,
 ) {
     let avg_hex_rad = precalc.avg_hex_rad;
+    let offs = &precalc.neighbor_offsets;
+    let neighbor_ids = &precalc.neighbor_ids_flat;
 
     // 1. Термическое поле (считается заново каждую итерацию)
     scratch
@@ -50,16 +52,17 @@ pub(super) fn compute_season_pressure_and_winds(
         let prev = &scratch.prev_thermal;
         let out = &mut scratch.thermal_field;
         out.par_iter_mut().enumerate().for_each(|(i, o)| {
-            let nbrs = &topology.cells[i].neighbors;
-            if nbrs.is_empty() {
+            let start = offs[i];
+            let end = offs[i + 1];
+            if start == end {
                 *o = prev[i];
                 return;
             }
             let mut sum = 0.0;
-            for &n in nbrs {
-                sum += prev[n];
+            for &n in &neighbor_ids[start..end] {
+                sum += prev[n as usize];
             }
-            *o = prev[i] * 0.3 + (sum / nbrs.len() as f32) * 0.7;
+            *o = prev[i] * 0.3 + (sum / (end - start) as f32) * 0.7;
         });
     }
 
@@ -78,21 +81,21 @@ pub(super) fn compute_season_pressure_and_winds(
         let prev = &scratch.prev_pressure;
         let out = &mut snap.pressure;
         out.par_iter_mut().enumerate().for_each(|(i, o)| {
-            let nbrs = &topology.cells[i].neighbors;
-            if nbrs.is_empty() {
+            let start = offs[i];
+            let end = offs[i + 1];
+            if start == end {
                 *o = prev[i];
                 return;
             }
             let mut sum = 0.0;
-            for &n in nbrs {
-                sum += prev[n];
+            for &n in &neighbor_ids[start..end] {
+                sum += prev[n as usize];
             }
-            *o = prev[i] * 0.3 + (sum / nbrs.len() as f32) * 0.7;
+            *o = prev[i] * 0.3 + (sum / (end - start) as f32) * 0.7;
         });
     }
 
     // 3. Ветра — градиент давления + Кориолис через Rodrigues
-    let offs = &precalc.neighbor_offsets;
     let tdirs = &precalc.tangent_dirs_flat;
 
     let pressure = &snap.pressure;
@@ -113,8 +116,7 @@ pub(super) fn compute_season_pressure_and_winds(
             let start = offs[i];
             let end = offs[i + 1];
             for (j, tdir) in tdirs.iter().enumerate().take(end).skip(start) {
-                let k = j - start;
-                let n_id = cell.neighbors[k];
+                let n_id = neighbor_ids[j] as usize;
                 let n_pos = topology.cells[n_id].center;
                 let raw_dir = n_pos - pos;
                 let safe_dist = raw_dir.length().max(avg_hex_rad * 0.3);
@@ -148,8 +150,7 @@ pub(super) fn compute_season_pressure_and_winds(
             let wind_dir = wind_3d.normalize_or_zero();
 
             for (j, tdir) in tdirs.iter().enumerate().take(end).skip(start) {
-                let k = j - start;
-                let n_id = cell.neighbors[k];
+                let n_id = neighbor_ids[j] as usize;
                 let to_neighbor = tdir;
                 let n_elev = (geology.elevations[n_id] - config.mountain_base_level).max(0.0);
                 let elev_diff = n_elev - my_elev;
@@ -202,6 +203,7 @@ pub(super) fn compute_ocean_currents(
     let avg_hex_rad = precalc.avg_hex_rad;
     let offs = &precalc.neighbor_offsets;
     let tdirs = &precalc.tangent_dirs_flat;
+    let neighbor_ids = &precalc.neighbor_ids_flat;
 
     let pressure = &snap.pressure;
     let temperatures = &snap.temperatures;
@@ -210,7 +212,7 @@ pub(super) fn compute_ocean_currents(
         .par_iter_mut()
         .enumerate()
         .for_each(|(i, current_out)| {
-            if geology.elevations[i] > 0.0 {
+            if !geology.is_ocean_cell(i) {
                 *current_out = Vec3::ZERO;
                 return;
             }
@@ -238,9 +240,8 @@ pub(super) fn compute_ocean_currents(
             let start = offs[i];
             let end = offs[i + 1];
             for (j, tdir) in tdirs.iter().enumerate().take(end).skip(start) {
-                let k = j - start;
-                let n_id = cell.neighbors[k];
-                if geology.elevations[n_id] <= 0.0 {
+                let n_id = neighbor_ids[j] as usize;
+                if geology.is_ocean_cell(n_id) {
                     let n_pos = topology.cells[n_id].center;
                     let raw_dir = n_pos - pos;
                     let safe_dist = raw_dir.length().max(avg_hex_rad * 0.3);
@@ -260,10 +261,9 @@ pub(super) fn compute_ocean_currents(
 
             // 4. Граничные течения
             let mut coast_normal = Vec3::ZERO;
-            for j in start..end {
-                let k = j - start;
-                let n_id = cell.neighbors[k];
-                if geology.elevations[n_id] > 0.0 {
+            for &n_id_u32 in &neighbor_ids[start..end] {
+    let n_id = n_id_u32 as usize;
+                if !geology.is_ocean_cell(n_id) {
                     let raw_dir = pos - topology.cells[n_id].center;
                     let tangent_from_coast = (raw_dir - pos * raw_dir.dot(pos)).normalize_or_zero();
                     coast_normal += tangent_from_coast;
@@ -300,26 +300,26 @@ pub(super) fn compute_ocean_currents(
         let prev = &scratch.prev_currents;
         let out = &mut snap.ocean_currents;
         out.par_iter_mut().enumerate().for_each(|(i, o)| {
-            if geology.elevations[i] > 0.0 {
+            if !geology.is_ocean_cell(i) {
                 *o = Vec3::ZERO;
                 return;
             }
-            let nbrs = &topology.cells[i].neighbors;
-            if nbrs.is_empty() {
+            let start = offs[i];
+            let end = offs[i + 1];
+            if start == end {
                 *o = prev[i];
                 return;
             }
             let mut sum = Vec3::ZERO;
-            let mut cnt = 0.0_f32;
-            for &n in nbrs {
-                if geology.elevations[n] > 0.0 {
+            for &n in &neighbor_ids[start..end] {
+                let n = n as usize;
+                if !geology.is_ocean_cell(n) {
                     sum += prev[i];
                 } else {
                     sum += prev[n];
                 }
-                cnt += 1.0;
             }
-            *o = prev[i] * 0.5 + (sum / cnt) * 0.5;
+            *o = prev[i] * 0.5 + (sum / (end - start) as f32) * 0.5;
         });
     }
 }

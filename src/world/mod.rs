@@ -3,6 +3,7 @@
 pub mod pipeline;
 pub mod states;
 pub mod topology;
+pub mod world_ui;
 
 use bevy::prelude::*;
 use pipeline::{PipelineSet, PipelineStage, WorldPipeline};
@@ -19,10 +20,10 @@ use crate::domains::{
 pub struct WorldConfig {
     /// Радиус планеты в мировых координатах (live, применяется к текущей планете).
     pub radius: f32,
-
     /// Радиус планеты, при котором звёздная система имеет исходный размер.
     pub reference_system_radius: f32,
-
+    /// Радиус, под который откалиброваны генераторы высот (tectonics / hydrology).
+    pub reference_radius: f32,
     /// Размерность, с которой будет создана СЛЕДУЮЩАЯ планета.
     /// Размерность ТЕКУЩЕЙ планеты хранится в `WorldTopology.subdivisions`.
     pub next_planet_subdivisions: u32,
@@ -38,7 +39,8 @@ impl Default for WorldConfig {
         Self {
             radius: 5.0,
             reference_system_radius: 5.0,
-            next_planet_subdivisions: 7,
+            reference_radius: 7.0,
+            next_planet_subdivisions: 7, // release - 8
             seed: rng.random_range(0..=u32::MAX),
         }
     }
@@ -53,6 +55,12 @@ impl WorldConfig {
     #[inline]
     pub fn system_scale(&self) -> f32 {
         self.radius / self.reference_system_radius.max(0.001)
+    }
+
+    /// Масштаб высот рельефа относительно радиуса, под который откалибрована геология.
+    #[inline]
+    pub fn height_scale(&self) -> f32 {
+        self.radius / self.reference_radius.max(0.001)
     }
 }
 

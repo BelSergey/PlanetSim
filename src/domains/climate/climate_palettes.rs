@@ -1,11 +1,13 @@
 // src/domains/climate/climate_palettes.rs
 
 use bevy::prelude::*;
-use rayon::prelude::*;
 
 use super::climate_data::ClimateLayer;
 use crate::{
-    domains::tectonics::tectonics_data::GeologyLayer,
+    domains::{
+        palettes::{LegendEntry, MapLegend, rgb_u8},
+        tectonics::tectonics_data::GeologyLayer,
+    },
     viewport::{Globe, ViewportViewConfig},
     world::{WorldConfig, topology::WorldTopology},
 };
@@ -15,7 +17,7 @@ use crate::{
 pub fn build_humidity_colors(climate: &ClimateLayer) -> Vec<[f32; 4]> {
     climate
         .humidity
-        .par_iter()
+        .iter()
         .map(|&h| humidity_to_color(h).to_linear().to_f32_array())
         .collect()
 }
@@ -49,7 +51,7 @@ fn humidity_to_color(h: f32) -> Color {
 pub fn build_temperature_colors(climate: &ClimateLayer) -> Vec<[f32; 4]> {
     climate
         .temperatures
-        .par_iter()
+        .iter()
         .map(|&t| temperature_to_color(t).to_linear().to_f32_array())
         .collect()
 }
@@ -89,7 +91,7 @@ fn temperature_to_color(t: f32) -> Color {
 pub fn build_albedo_colors(climate: &ClimateLayer) -> Vec<[f32; 4]> {
     climate
         .albedo
-        .par_iter()
+        .iter()
         .map(|&a| Color::srgb(a, a, a).to_linear().to_f32_array())
         .collect()
 }
@@ -97,7 +99,7 @@ pub fn build_albedo_colors(climate: &ClimateLayer) -> Vec<[f32; 4]> {
 pub fn build_continentality_colors(climate: &ClimateLayer) -> Vec<[f32; 4]> {
     climate
         .continentality
-        .par_iter()
+        .iter()
         .map(|&c| {
             let color = if c < 0.0 {
                 // ОКЕАН: c ∈ [-1.0 (открытый океан) .. 0.0 (берег/маргинальное море)]
@@ -123,7 +125,7 @@ pub fn build_continentality_colors(climate: &ClimateLayer) -> Vec<[f32; 4]> {
 pub fn build_pressure_colors(climate: &ClimateLayer) -> Vec<[f32; 4]> {
     climate
         .pressure
-        .par_iter()
+        .iter()
         .map(|&p| {
             let norm = p.clamp(-1.0, 1.0);
             let color = if norm < 0.0 {
@@ -142,14 +144,13 @@ pub fn build_pressure_colors(climate: &ClimateLayer) -> Vec<[f32; 4]> {
 pub fn build_wind_colors(climate: &ClimateLayer) -> Vec<[f32; 4]> {
     let max_speed = climate
         .winds
-        .par_iter()
+        .iter()
         .map(|w| w.length())
-        .reduce(|| 0.0001_f32, f32::max) // ← замыкание вместо значения
-        .max(0.0001);
+        .fold(0.0001_f32, f32::max);
 
     climate
         .winds
-        .par_iter()
+        .iter()
         .map(|&w| {
             let s = (w.length() / max_speed).clamp(0.0, 1.0).sqrt();
             wind_speed_to_color(s).to_linear().to_f32_array()
@@ -188,7 +189,7 @@ pub(super) fn draw_wind_arrows_gizmos(
     climate: Res<ClimateLayer>,
     view_config: Res<ViewportViewConfig>,
     world_config: Res<WorldConfig>,
-    globe_query: Query<&GlobalTransform, With<Globe>>,
+    globe_query: Query<&Transform, With<Globe>>,
 ) {
     if !view_config.show_wind_arrows
         || climate.wind_arrows_cache.is_empty()
@@ -196,11 +197,9 @@ pub(super) fn draw_wind_arrows_gizmos(
     {
         return;
     }
-    let Ok(global_transform) = globe_query.single() else {
+    let Ok(globe_transform) = globe_query.single() else {
         return;
     };
-
-    let globe_transform = global_transform.compute_transform();
 
     let r = world_config.radius;
     let base_len = r * 0.08;
@@ -230,7 +229,7 @@ pub(super) fn draw_ocean_currents_gizmos(
     climate: Res<ClimateLayer>,
     view_config: Res<ViewportViewConfig>,
     world_config: Res<WorldConfig>,
-    globe_query: Query<&GlobalTransform, With<Globe>>,
+    globe_query: Query<&Transform, With<Globe>>,
 ) {
     if !view_config.show_ocean_currents
         || climate.current_arrows_cache.is_empty()
@@ -238,11 +237,10 @@ pub(super) fn draw_ocean_currents_gizmos(
     {
         return;
     }
-    let Ok(global_transform) = globe_query.single() else {
+    let Ok(globe_transform) = globe_query.single() else {
         return;
     };
 
-    let globe_transform = global_transform.compute_transform();
     let r = world_config.radius;
     let base_len = r * 0.07;
 
@@ -267,7 +265,7 @@ pub(super) fn draw_ocean_currents_gizmos(
 pub fn build_precipitation_colors(climate: &ClimateLayer) -> Vec<[f32; 4]> {
     climate
         .precipitation
-        .par_iter()
+        .iter()
         .zip(&climate.temperatures)
         .map(|(&p, &t)| precipitation_to_color(p, t).to_linear().to_f32_array())
         .collect()
@@ -322,4 +320,212 @@ fn sample_gradient(stops: &[(f32, [f32; 3])], x: f32) -> [f32; 3] {
         }
     }
     stops.last().unwrap().1
+}
+
+// ==== ЛЕГЕНДЫ КЛИМАТА ====
+
+pub fn humidity_legend() -> MapLegend {
+    MapLegend {
+        title: "Относительная влажность",
+        entries: vec![
+            LegendEntry {
+                rgb: rgb_u8(0.82, 0.58, 0.32),
+                label: "Сухая пустыня  (0.00)".into(),
+            },
+            LegendEntry {
+                rgb: rgb_u8(0.88, 0.82, 0.45),
+                label: "Полупустыня / степь  (0.25)".into(),
+            },
+            LegendEntry {
+                rgb: rgb_u8(0.42, 0.78, 0.44),
+                label: "Умеренная влажность  (0.50)".into(),
+            },
+            LegendEntry {
+                rgb: rgb_u8(0.15, 0.62, 0.78),
+                label: "Влажно / муссон  (0.75)".into(),
+            },
+            LegendEntry {
+                rgb: rgb_u8(0.06, 0.22, 0.68),
+                label: "Насыщение  (1.00)".into(),
+            },
+        ],
+    }
+}
+
+pub fn temperature_legend() -> MapLegend {
+    MapLegend {
+        title: "Температура (°C)",
+        entries: vec![
+            LegendEntry {
+                rgb: rgb_u8(0.92, 0.94, 1.00),
+                label: "Арктический лёд  (<= -30)".into(),
+            },
+            LegendEntry {
+                rgb: rgb_u8(0.60, 0.20, 0.80),
+                label: "Суровый мороз  (-15)".into(),
+            },
+            LegendEntry {
+                rgb: rgb_u8(0.05, 0.35, 0.85),
+                label: "Точка замерзания  (0)".into(),
+            },
+            LegendEntry {
+                rgb: rgb_u8(0.20, 0.72, 0.40),
+                label: "Умеренный климат  (12)".into(),
+            },
+            LegendEntry {
+                rgb: rgb_u8(0.92, 0.82, 0.20),
+                label: "Субтропики  (22)".into(),
+            },
+            LegendEntry {
+                rgb: rgb_u8(0.92, 0.40, 0.10),
+                label: "Жара  (30)".into(),
+            },
+            LegendEntry {
+                rgb: rgb_u8(0.65, 0.08, 0.08),
+                label: "Пустынный зной  (>= 42)".into(),
+            },
+        ],
+    }
+}
+
+pub fn albedo_legend() -> MapLegend {
+    MapLegend {
+        title: "Альбедо",
+        entries: vec![
+            LegendEntry {
+                rgb: rgb_u8(0.05, 0.05, 0.05),
+                label: "Тёмная поверхность  (0.05)".into(),
+            },
+            LegendEntry {
+                rgb: rgb_u8(0.30, 0.30, 0.30),
+                label: "Умеренно тёмная  (0.30)".into(),
+            },
+            LegendEntry {
+                rgb: rgb_u8(0.60, 0.60, 0.60),
+                label: "Средняя  (0.60)".into(),
+            },
+            LegendEntry {
+                rgb: rgb_u8(0.85, 0.85, 0.85),
+                label: "Светлая  (0.85)".into(),
+            },
+            LegendEntry {
+                rgb: rgb_u8(1.00, 1.00, 1.00),
+                label: "Снег / лёд  (1.00)".into(),
+            },
+        ],
+    }
+}
+
+pub fn continentality_legend() -> MapLegend {
+    MapLegend {
+        title: "Континентальность",
+        entries: vec![
+            LegendEntry {
+                rgb: rgb_u8(0.45, 0.78, 0.88),
+                label: "Открытый океан  (-1.0)".into(),
+            },
+            LegendEntry {
+                rgb: rgb_u8(0.20, 0.50, 0.70),
+                label: "Берег / море  (~0.0)".into(),
+            },
+            LegendEntry {
+                rgb: rgb_u8(0.92, 0.85, 0.68),
+                label: "Побережье суши  (0.0)".into(),
+            },
+            LegendEntry {
+                rgb: rgb_u8(0.85, 0.55, 0.30),
+                label: "Внутриматериковый  (0.5)".into(),
+            },
+            LegendEntry {
+                rgb: rgb_u8(0.48, 0.15, 0.10),
+                label: "Глубь материка  (1.0)".into(),
+            },
+        ],
+    }
+}
+
+pub fn pressure_legend() -> MapLegend {
+    MapLegend {
+        title: "Атмосферное давление",
+        entries: vec![
+            LegendEntry {
+                rgb: rgb_u8(0.10, 0.25, 0.95),
+                label: "Низкое — циклоны / ITCZ  (-1)".into(),
+            },
+            LegendEntry {
+                rgb: rgb_u8(0.95, 0.95, 0.95),
+                label: "Норма  (0)".into(),
+            },
+            LegendEntry {
+                rgb: rgb_u8(0.95, 0.20, 0.10),
+                label: "Высокое — антициклоны  (+1)".into(),
+            },
+        ],
+    }
+}
+
+pub fn wind_legend() -> MapLegend {
+    MapLegend {
+        title: "Скорость ветра",
+        entries: vec![
+            LegendEntry {
+                rgb: rgb_u8(0.08, 0.12, 0.35),
+                label: "Штиль".into(),
+            },
+            LegendEntry {
+                rgb: rgb_u8(0.08, 0.60, 0.80),
+                label: "Слабый".into(),
+            },
+            LegendEntry {
+                rgb: rgb_u8(0.30, 0.85, 0.40),
+                label: "Умеренный".into(),
+            },
+            LegendEntry {
+                rgb: rgb_u8(0.95, 0.85, 0.10),
+                label: "Сильный".into(),
+            },
+            LegendEntry {
+                rgb: rgb_u8(0.95, 0.15, 0.40),
+                label: "Шторм".into(),
+            },
+        ],
+    }
+}
+
+pub fn precipitation_legend() -> MapLegend {
+    // Цвет точки = комбинация кол-ва осадков и температуры.
+    // Показываем ключевые цвета обеих шкал.
+    MapLegend {
+        title: "Осадки (цвет = кол-во + T)",
+        entries: vec![
+            LegendEntry {
+                rgb: rgb_u8(0.85, 0.68, 0.42),
+                label: "Пустыня — дождь".into(),
+            },
+            LegendEntry {
+                rgb: rgb_u8(0.38, 0.76, 0.42),
+                label: "Умеренные дожди".into(),
+            },
+            LegendEntry {
+                rgb: rgb_u8(0.16, 0.22, 0.74),
+                label: "Муссонный ливень".into(),
+            },
+            LegendEntry {
+                rgb: rgb_u8(0.52, 0.12, 0.68),
+                label: "Экстремальный ливень".into(),
+            },
+            LegendEntry {
+                rgb: rgb_u8(0.52, 0.55, 0.60),
+                label: "Сухая мерзлота — снег".into(),
+            },
+            LegendEntry {
+                rgb: rgb_u8(0.72, 0.88, 0.96),
+                label: "Умеренный снегопад".into(),
+            },
+            LegendEntry {
+                rgb: rgb_u8(0.90, 0.96, 1.00),
+                label: "Сильная метель".into(),
+            },
+        ],
+    }
 }

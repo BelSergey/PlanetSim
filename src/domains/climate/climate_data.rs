@@ -139,11 +139,20 @@ impl ClimateLayer {
         let t = ((2.0 - temp_c) / 6.0).clamp(0.0, 1.0);
         t * t * (3.0 - 2.0 * t)
     }
+
     pub fn interpolate_from_orbit(&mut self, season_factor: f32) {
         let num_cells = self.spring.temperatures.len();
         if num_cells == 0
             || self.summer.temperatures.len() != num_cells
             || self.winter.temperatures.len() != num_cells
+            || self.temperatures.len() != num_cells
+            || self.humidity.len() != num_cells
+            || self.precipitation.len() != num_cells
+            || self.albedo.len() != num_cells
+            || self.pressure.len() != num_cells
+            || self.winds.len() != num_cells
+            || self.winds_3d.len() != num_cells
+            || self.ocean_currents.len() != num_cells
         {
             return;
         }
@@ -157,7 +166,6 @@ impl ClimateLayer {
         let inv_t = 1.0 - t;
 
         use rayon::prelude::*;
-        let t = t;
 
         self.temperatures
             .par_iter_mut()
@@ -170,21 +178,23 @@ impl ClimateLayer {
             .zip(self.ocean_currents.par_iter_mut())
             .enumerate()
             .for_each(
-                |(i, (((((((temperature, humidity), precipitation), albedo), pressure), winds), winds_3d), ocean_currents))| {
-                    *temperature =
-                        snap_a.temperatures[i] * inv_t + snap_b.temperatures[i] * t;
-                    *humidity =
-                        snap_a.humidity[i] * inv_t + snap_b.humidity[i] * t;
-                    *precipitation =
-                        snap_a.precipitation[i] * inv_t + snap_b.precipitation[i] * t;
-                    *albedo =
-                        snap_a.albedo[i] * inv_t + snap_b.albedo[i] * t;
-                    *pressure =
-                        snap_a.pressure[i] * inv_t + snap_b.pressure[i] * t;
-                    *winds =
-                        snap_a.winds[i] * inv_t + snap_b.winds[i] * t;
-                    *winds_3d =
-                        snap_a.winds_3d[i] * inv_t + snap_b.winds_3d[i] * t;
+                |(
+                    i,
+                    (
+                        (
+                            (((((temperature, humidity), precipitation), albedo), pressure), winds),
+                            winds_3d,
+                        ),
+                        ocean_currents,
+                    ),
+                )| {
+                    *temperature = snap_a.temperatures[i] * inv_t + snap_b.temperatures[i] * t;
+                    *humidity = snap_a.humidity[i] * inv_t + snap_b.humidity[i] * t;
+                    *precipitation = snap_a.precipitation[i] * inv_t + snap_b.precipitation[i] * t;
+                    *albedo = snap_a.albedo[i] * inv_t + snap_b.albedo[i] * t;
+                    *pressure = snap_a.pressure[i] * inv_t + snap_b.pressure[i] * t;
+                    *winds = snap_a.winds[i] * inv_t + snap_b.winds[i] * t;
+                    *winds_3d = snap_a.winds_3d[i] * inv_t + snap_b.winds_3d[i] * t;
                     *ocean_currents =
                         snap_a.ocean_currents[i] * inv_t + snap_b.ocean_currents[i] * t;
                 },

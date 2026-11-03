@@ -3,6 +3,7 @@
 use bevy::prelude::*;
 use bevy_egui::egui;
 
+use super::SeasonalControl;
 use super::{
     climate_config::ClimateConfig,
     climate_data::{ClimateLayer, ClimateSeason},
@@ -16,6 +17,7 @@ pub fn draw_climate_tab_system(
     InMut(ui): InMut<'_, egui::Ui>,
     mut config: ResMut<ClimateConfig>,
     mut climate: ResMut<ClimateLayer>,
+    mut seasonal_control: ResMut<SeasonalControl>,
     mut pipeline: ResMut<WorldPipeline>,
     mut gen_req: ResMut<GenerationRequest>,
 ) {
@@ -34,6 +36,10 @@ pub fn draw_climate_tab_system(
     ui.separator();
 
     // --- БЫСТРЫЙ ПЕРЕКЛЮЧАТЕЛЬ ПРЕДРАССЧИТАННЫХ СЕЗОНОВ ---
+    ui.checkbox(
+        &mut seasonal_control.automatic,
+        "Автоматическая смена сезонов по орбите",
+    );
     // (Оставляем мгновенным, так как все 3 сезона уже лежат в памяти!)
     ui.label("Отображаемый сезон (Сев. полушарие):");
     let mut season_changed = false;
@@ -54,6 +60,7 @@ pub fn draw_climate_tab_system(
     });
 
     if season_changed {
+        seasonal_control.automatic = false;
         climate.apply_active_season(config.active_season);
         pipeline.recolor_mesh = true;
     }

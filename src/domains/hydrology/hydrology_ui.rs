@@ -15,9 +15,18 @@ pub fn draw_hydrology_tab_system(
     mut gen_req: ResMut<GenerationRequest>,
     mut pipeline: ResMut<WorldPipeline>,
 ) {
-    ui.heading("Почвы и Гидрология");
+    ui.heading("Биосфера и Поверхность");
     ui.separator();
 
+    let regen_btn = ui.add_sized(
+        [ui.available_width(), 40.0],
+        egui::Button::new("Пересчитать почвы, озёра, реки и биомы"),
+    );
+    if regen_btn.clicked() {
+        gen_req.request(PipelineStage::Hydrology);
+    }
+
+    ui.separator();
     ui.label("1. Модель почв (CLORPT):");
     ui.add(
         egui::Slider::new(&mut config.chemical_weathering_rate, 0.0..=1.2)
@@ -41,15 +50,22 @@ pub fn draw_hydrology_tab_system(
 
     ui.add_space(10.0);
     ui.separator();
-    ui.label("2. Речная сеть:");
+    ui.label("2. Реки и Озёра:");
 
     ui.add(egui::Slider::new(&mut config.runoff_multiplier, 0.2..=3.0).text("Множитель стока"));
     ui.add(
         egui::Slider::new(&mut config.lithology_erosion_bias, 0.0..=0.05)
             .text("Влияние мягкости пород"),
     );
+    ui.add(
+        egui::Slider::new(&mut config.min_lake_depth, 0.0005..=0.015)
+            .text("Мин. глубина чаши озера"),
+    );
+    ui.add(
+        egui::Slider::new(&mut config.lake_evaporation_scale, 0.3..=2.5)
+            .text("Испарение с озёр (пресные ↔ солёные)"),
+    );
 
-    // Эти два ползунка перестраивают 3D-меш рек мгновенно прямо при перетаскивании!
     let mut mesh_changed = false;
     mesh_changed |= ui
         .add(
@@ -62,14 +78,51 @@ pub fn draw_hydrology_tab_system(
         .add(egui::Slider::new(&mut config.river_width_scale, 0.3..=5.0).text("Ширина русел"))
         .changed();
 
-    ui.add(
-        egui::Slider::new(&mut config.river_groundwater_seepage, 0.0..=2.5)
-            .text("Подпитка почвы от рек"),
-    );
-    ui.checkbox(
-        &mut config.coupled_climate_feedback,
-        "Обратная связь с климатом (Альбедо и Испарение)",
-    );
+ui.add(
+    egui::Slider::new(&mut config.river_groundwater_seepage, 0.0..=2.5)
+        .text("Подпитка почвы от рек и озёр"),
+);
+
+ui.add_space(4.0);
+ui.separator();
+ui.label("Обратная связь с климатом:");
+
+ui.checkbox(
+    &mut config.coupled_climate_feedback,
+    "Включить обратную связь (Альбедо и Испарение)",
+);
+
+ui.checkbox(
+    &mut config.defer_initial_feedback,
+    "Отложить при первичной генерации",
+)
+.on_hover_text(
+    "Экономит ~1300 мс при первом показе планеты.\n\
+     Биомы строятся по усреднённому альбедо суши.\n\
+     Полный feedback запускается кнопкой ниже.",
+);
+
+let feedback_enabled =
+    config.coupled_climate_feedback && !config.defer_initial_feedback;
+
+let feedback_btn = ui.add_sized(
+    [ui.available_width(), 34.0],
+    egui::Button::new("🌡 Применить обратную связь климата (~1.2 с)"),
+);
+
+if feedback_btn
+    .on_hover_text(
+        "Пересчитает климат, используя текущие биомы, реки и озёра.\n\
+         Запускает PipelineStage::Hydrology.",
+    )
+    .clicked()
+{
+    gen_req.request(PipelineStage::Hydrology);
+}
+
+if !feedback_enabled {
+    ui.weak("ℹ Сейчас feedback отложен — биомы построены по усреднённому альбедо.");
+}
 
     ui.add_space(10.0);
     ui.separator();
@@ -87,17 +140,24 @@ pub fn draw_hydrology_tab_system(
         egui::Slider::new(&mut config.wetland_max_slope, 0.002..=0.025).text("Уклон заболачивания"),
     );
 
-    ui.add_space(12.0);
-    if ui.button("Пересчитать почвы, реки и биомы").clicked() {
-        gen_req.request(PipelineStage::Hydrology);
-    }
+    ui.add_space(10.0);
+    ui.separator();
+    ui.label("4. Ресурсы и Агропотенциал:");
+
+    ui.add(
+        egui::Slider::new(&mut config.food_yield_multiplier, 0.3..=2.5)
+            .text("Продовольственная ёмкость"),
+    );
+    ui.add(
+        egui::Slider::new(&mut config.mineral_density, 0.3..=2.5)
+            .text("Плотность руд и ископаемых"),
+    );
+    ui.add(
+        egui::Slider::new(&mut config.bio_resource_abundance, 0.3..=2.5)
+            .text("Обилие биоресурсов и фауны"),
+    );
 
     if mesh_changed {
         pipeline.rebuild_rivers = true;
-    }
-
-    ui.add_space(12.0);
-    if ui.button("Пересчитать почвы и русла").clicked() {
-        gen_req.request(PipelineStage::Hydrology);
     }
 }

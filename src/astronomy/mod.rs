@@ -1,9 +1,15 @@
 // src/astronomy/mod.rs
 
-use crate::simulation::clock::{SimulationClock, SimulationClockSet};
-use crate::world::WorldConfig;
+use crate::{
+    domains::climate::ClimateConfig,
+    simulation::clock::{SimulationClock, SimulationClockSet},
+    world::WorldConfig,
+};
 use bevy::prelude::*;
 use std::f64::consts::TAU;
+
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AstronomyUpdateSet;
 
 /// Ресурс текущего астрономического сезона, вычисляемый из положения на орбите.
 #[derive(Resource, Default, Debug, Clone, Copy)]
@@ -46,7 +52,7 @@ impl AxialRotation {
     pub fn earth() -> Self {
         Self {
             obliquity_radians: 23.439281_f32.to_radians(),
-            rotation_period_seconds: 86_164.0905,
+            rotation_period_seconds: 86_164.090_5,
             max_visual_spin_speed: 0.8,
         }
     }
@@ -67,6 +73,7 @@ impl Plugin for AstronomyPlugin {
             Update,
             (update_orbits, update_sunlight_direction)
                 .chain()
+                .in_set(AstronomyUpdateSet)
                 .after(SimulationClockSet::Advance),
         );
     }
@@ -74,13 +81,13 @@ impl Plugin for AstronomyPlugin {
 
 /// Обновляет орбитальное положение, наклон оси и суточное вращение.
 fn update_orbits(
-    time: Res<Time>,
     clock: Res<SimulationClock>,
     world_config: Res<WorldConfig>,
+    climate_config: Res<ClimateConfig>,
     mut season_state: ResMut<OrbitalSeasonState>,
     mut last_system_scale: Local<Option<f32>>,
-    mut visual_spin_angle: Local<f32>,
-    mut query: Query<(&Orbit, &AxialRotation, &mut Transform), Without<Sun>>,
+    mut last_axial_tilt: Local<Option<f32>>,
+    mut query: Query<(&Orbit, &mut AxialRotation, &mut Transform), Without<Sun>>,
     mut sun_query: Query<&mut Transform, (With<Sun>, Without<Orbit>)>,
 ) {
     let system_scale = world_config.system_scale();
@@ -97,11 +104,19 @@ fn update_orbits(
         }
     }
 
-    if clock.paused && !scale_changed {
+    let axial_tilt = climate_config.axial_tilt;
+    let axial_tilt_changed = last_axial_tilt
+        .map(|last| (last - axial_tilt).abs() > 1e-6)
+        .unwrap_or(true);
+    if axial_tilt_changed {
+        *last_axial_tilt = Some(axial_tilt);
+    }
+
+    if clock.paused && !scale_changed && !axial_tilt_changed {
         return;
     }
 
-    for (orbit, axial, mut transform) in &mut query {
+    for (orbit, mut axial, mut transform) in &mut query {
         let orbit_period = orbit.period_seconds.max(1.0);
         let orbit_angle = (orbit.phase_at_epoch - clock.elapsed_seconds / orbit_period * TAU)
             .rem_euclid(TAU) as f32;
@@ -116,18 +131,13 @@ fn update_orbits(
             orbit_radius * orbit_angle.sin(),
         );
 
-        if !clock.paused {
-            let physical_spin_rate =
-                (clock.time_scale / axial.rotation_period_seconds.max(1.0) * TAU) as f32;
-            let effective_spin_rate = physical_spin_rate.min(axial.max_visual_spin_speed);
-            *visual_spin_angle = (*visual_spin_angle + effective_spin_rate * time.delta_secs())
-                .rem_euclid(TAU as f32);
-        }
+        // ClimateConfig is the single source of truth for axial tilt, so the
+        // visible axis and the seasonal insolation model cannot drift apart.
+        axial.obliquity_radians = axial_tilt;
 
-        let axial_tilt = Quat::from_rotation_z(axial.obliquity_radians);
-        let daily_spin = Quat::from_rotation_y(*visual_spin_angle);
-
-        transform.rotation = axial_tilt * daily_spin;
+        // No automatic daily spin: the globe remains visually stable while
+        // orbit, sunlight direction and seasonal climate continue to advance.
+        transform.rotation = Quat::from_rotation_z(axial.obliquity_radians);
     }
 }
 

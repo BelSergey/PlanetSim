@@ -17,7 +17,7 @@ pub struct HydrologyConfig {
     /// Коэффициент потенциального испарения (баланс сухости/влажности климата)
     pub aridity_evap_scale: f32,
 
-    // --- ПАРАМЕТРЫ РЕК ---
+    // --- ПАРАМЕТРЫ РЕК И ОЗЁР ---
     /// Множитель полноводности стока
     pub runoff_multiplier: f32,
     /// Минимальный порог накопленного потока для образования реки (в физических единицах сферы)
@@ -26,11 +26,21 @@ pub struct HydrologyConfig {
     pub lithology_erosion_bias: f32,
     /// Масштаб ширины 3D-лент рек на глобусе
     pub river_width_scale: f32,
+    /// Минимальная глубина топографической впадины для образования озера
+    pub min_lake_depth: f32,
+    /// Множитель испарения с поверхности озёр (баланс между проточными пресными и бессточными солёными озёрами)
+    pub lake_evaporation_scale: f32,
 
-    /// Сила увлажнения почвы реками (в самой клетке русла и фильтрация в соседние клетки долины)
+    /// Сила увлажнения почвы реками и озёрами
     pub river_groundwater_seepage: f32,
-    /// Включить двухпроходную обратную связь (Биомы и Реки меняют Альбедо, Влажность воздуха и Осадки)
+    /// Включить двухпроходную обратную связь (Биомы, Озёра и Реки меняют Альбедо, Влажность воздуха и Осадки)
     pub coupled_climate_feedback: bool,
+
+    /// При первичной генерации планеты пропускать второй проход обратной связи
+/// (климат → биомы → альбедо/влажность → климат).
+/// Экономит ~1300 мс, биомы на первом показе строятся по усреднённому
+/// альбедо суши. Полный feedback запускается вручную кнопкой в Hydrology UI.
+pub defer_initial_feedback: bool,
 
     // --- ПАРАМЕТРЫ БИОМОВ ---
     /// Сила влияния текстуры и влагоемкости почвы (песок/глина) на сдвиг биомов Уиттекера
@@ -39,6 +49,11 @@ pub struct HydrologyConfig {
     pub riparian_river_multiplier: f32,
     /// Максимальный уклон для образования болот (Wetland) на глинистых почвах
     pub wetland_max_slope: f32,
+
+    // --- ПАРАМЕТРЫ РЕСУРСОВ И АГРОПОТЕНЦИАЛА ---
+    pub food_yield_multiplier: f32,
+    pub mineral_density: f32,
+    pub bio_resource_abundance: f32,
 }
 
 impl Default for HydrologyConfig {
@@ -54,13 +69,20 @@ impl Default for HydrologyConfig {
             river_threshold: 0.00035,
             lithology_erosion_bias: 0.015,
             river_width_scale: 3.0,
+            min_lake_depth: 0.0025,
+            lake_evaporation_scale: 1.0,
 
             river_groundwater_seepage: 1.0,
             coupled_climate_feedback: true,
+            defer_initial_feedback: true,
 
             soil_biome_influence: 0.55,
             riparian_river_multiplier: 2.2,
             wetland_max_slope: 0.009,
+
+            food_yield_multiplier: 1.0,
+            mineral_density: 1.0,
+            bio_resource_abundance: 1.0,
         }
     }
 }

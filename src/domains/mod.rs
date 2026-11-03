@@ -1,9 +1,13 @@
 // src/domains/mod.rs
+
+pub mod civilization;
 pub mod climate;
-pub mod generator;
 pub mod hydrology;
-pub mod save;
 pub mod tectonics;
+
+pub mod generator;
+pub mod palettes;
+pub mod save;
 
 use bevy::prelude::*;
 use generator::{GenerationRequest, handle_generation_task, spawn_generation_task};
@@ -19,6 +23,7 @@ impl Plugin for DomainsPlugin {
                 tectonics::TectonicsPlugin,
                 climate::ClimatePlugin,
                 hydrology::HydrologyPlugin,
+                civilization::CivilizationPlugin,
             ))
             .add_systems(Startup, warmup_gizmos_shader)
             .add_systems(
@@ -33,6 +38,7 @@ impl Plugin for DomainsPlugin {
     }
 }
 
+/// Прогревает wgpu-пайплайн для 3D-стрелок на старте, чтобы при первом клике не было фриза
 fn warmup_gizmos_shader(mut gizmos: Gizmos) {
     gizmos.arrow(Vec3::ZERO, Vec3::Y * 0.0001, Color::NONE);
 }

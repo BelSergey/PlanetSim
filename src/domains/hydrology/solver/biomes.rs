@@ -12,7 +12,6 @@ use crate::{
     },
     world::topology::WorldTopology,
 };
-use rayon::prelude::*;
 
 pub(super) fn compute_biomes(
     topology: &WorldTopology,
@@ -22,146 +21,139 @@ pub(super) fn compute_biomes(
     config: &HydrologyConfig,
     noise: &SurfaceNoise,
 ) {
-    let soils = &hydrology.soils;
-    let soil_textures = &hydrology.soil_texture;
-    let flow_accumulation = &hydrology.flow_accumulation;
-    let soil_moisture = &hydrology.soil_moisture;
-    hydrology
-        .biomes
-        .par_iter_mut()
-        .enumerate()
-        .for_each(|(i, biome_out)| {
-            let elev = geology.elevations[i];
+    let num_cells = topology.cells.len();
 
-            // 1. Сезонные температуры и осадки
-            let t_spring = climate.spring.temperatures[i];
-            let t_summer = climate.summer.temperatures[i];
-            let t_winter = climate.winter.temperatures[i];
+    for i in 0..num_cells {
+        let elev = geology.elevations[i];
 
-            let mean_temp = (2.0 * t_spring + t_summer + t_winter) * 0.25;
-            let warm_temp = t_summer.max(t_winter).max(t_spring);
-            let cold_temp = t_summer.min(t_winter).min(t_spring);
+        let t_spring = climate.spring.temperatures[i];
+        let t_summer = climate.summer.temperatures[i];
+        let t_winter = climate.winter.temperatures[i];
 
-            // Когерентный шум для рваных экотонов (не меняет сами физические массивы климата)
-            let t_jit = noise.temp_jitter[i] * 1.5;
-            let m_jit = noise.moisture_jitter[i];
+        let mean_temp = (2.0 * t_spring + t_summer + t_winter) * 0.25;
+        let warm_temp = t_summer.max(t_winter).max(t_spring);
+        let cold_temp = t_summer.min(t_winter).min(t_spring);
 
-            let eff_mean_temp = mean_temp + t_jit;
-            let eff_warm_temp = warm_temp + t_jit * 0.85;
-            let eff_cold_temp = cold_temp + t_jit * 0.85;
+        let t_jit = noise.temp_jitter[i] * 1.5;
+        let m_jit = noise.moisture_jitter[i];
+        let ice_jitter = noise.temp_jitter[i] * 0.8;
 
-            // 2. Океанические биомы (с естественной кромкой морского льда)
-            if elev <= 0.0 {
-                let ice_jitter = noise.temp_jitter[i] * 0.8;
-                *biome_out = if mean_temp + ice_jitter < -4.5 || warm_temp + ice_jitter < -1.0 {
-                    Biome::SeaIce
-                } else if elev > -0.09 {
-                    Biome::ShallowOcean
-                } else {
-                    Biome::DeepOcean
-                };
-                return;
-            }
+        let eff_mean_temp = mean_temp + t_jit;
+        let eff_warm_temp = warm_temp + t_jit * 0.85;
+        let eff_cold_temp = cold_temp + t_jit * 0.85;
 
-            let p_spring = climate.spring.precipitation[i];
-            let p_summer = climate.summer.precipitation[i];
-            let p_winter = climate.winter.precipitation[i];
-            let annual_precip = (2.0 * p_spring + p_summer + p_winter) * 0.25;
-
-            // Определяем осадки самого теплого и самого холодного сезона (для муссонов и Средиземноморья)
-            let (warm_precip, cold_precip) = if t_summer >= t_winter {
-                (p_summer, p_winter)
+        // 1. Океанические биомы (строго по `geology.is_ocean_cell(i)`)
+        if geology.is_ocean_cell(i) {
+            hydrology.biomes[i] = if mean_temp + ice_jitter < -4.5 || warm_temp + ice_jitter < -1.0
+            {
+                Biome::SeaIce
+            } else if elev > -0.09 {
+                Biome::ShallowOcean
             } else {
-                (p_winter, p_summer)
+                Biome::DeepOcean
             };
+            continue;
+        }
 
-            // 3. Рельеф (уклон)
-            let neighbors = &topology.cells[i].neighbors;
-            let mut max_slope = 0.0_f32;
-            for &n_id in neighbors {
-                let diff = (elev - geology.elevations[n_id]).abs();
-                if diff > max_slope {
-                    max_slope = diff;
-                }
-            }
-
-            let soil = soils[i];
-            let [sand, _silt, clay] = soil_textures[i];
-            let flow = flow_accumulation[i];
-
-            // 4. Криосфера и высокогорные скалы
-            // Вечные льды (ледниковые щиты и снежные вершины)
-            if eff_warm_temp < 0.0 || (eff_mean_temp < -9.0 && eff_warm_temp < 3.5) {
-                *biome_out = Biome::IceSheet;
-                return;
-            }
-
-            // Высокогорные скалы и осыпи (крутые склоны на Leptosol или выше линии леса)
-            if soil == SoilType::Leptosol
-                && (elev > 0.22 + m_jit * 0.02
-                    || max_slope > config.mountain_slope_threshold * 1.15)
-            {
-                *biome_out = Biome::AlpineBare;
-                return;
-            }
-
-            // Тундра (короткое холодное лето, деревья не могут вырасти, мерзлотный Gelisol)
-            if eff_warm_temp < 8.5 || soil == SoilType::Gelisol {
-                *biome_out = if max_slope > config.mountain_slope_threshold {
-                    Biome::AlpineBare
+        // 2. Озёрные биомы (проточные пресные, бессточные солёные и замёрзшие)
+        if hydrology.is_lake_cell(i) {
+            let is_salt = hydrology.is_salt_lake[i];
+            let freeze_thresh = if is_salt { -4.0 } else { -2.0 };
+            hydrology.biomes[i] =
+                if mean_temp + ice_jitter < freeze_thresh || warm_temp + ice_jitter < 0.0 {
+                    Biome::LakeIce
+                } else if is_salt {
+                    Biome::SaltLake
                 } else {
-                    Biome::Tundra
+                    Biome::FreshwaterLake
                 };
-                return;
+            continue;
+        }
+
+        // 3. Наземные биомы (включая сухие низменности с elev <= 0.0)
+        let p_spring = climate.spring.precipitation[i];
+        let p_summer = climate.summer.precipitation[i];
+        let p_winter = climate.winter.precipitation[i];
+        let annual_precip = (2.0 * p_spring + p_summer + p_winter) * 0.25;
+
+        let (warm_precip, cold_precip) = if t_summer >= t_winter {
+            (p_summer, p_winter)
+        } else {
+            (p_winter, p_summer)
+        };
+
+        let neighbors = &topology.cells[i].neighbors;
+        let mut max_slope = 0.0_f32;
+        for &n_id in neighbors {
+            let diff = (elev - geology.elevations[n_id]).abs();
+            if diff > max_slope {
+                max_slope = diff;
             }
+        }
 
-            // 5. ГЛАВНЫЙ ИСТОЧНИК ВЛАГИ ДЛЯ БИОМОВ — ВЛАЖНОСТЬ ПОЧВЫ (soil_moisture)
-            let sm = soil_moisture[i];
+        let soil = hydrology.soils[i];
+        let [sand, _silt, clay] = hydrology.soil_texture[i];
+        let flow = hydrology.flow_accumulation[i];
 
-            // Переводим влажность почвы [0..1] в эквивалентный индекс увлажнения Уиттекера
-            // и возмущаем порог 3D-шумом (±12%) для формирования лесостепи и пятнистых переходов
-            let base_moisture_idx = (sm / (1.0 - sm * 0.68).max(0.15)).clamp(0.0, 2.5);
-            let moisture_idx = (base_moisture_idx * (1.0 + m_jit * 0.12)).clamp(0.0, 2.5);
+        if eff_warm_temp < 0.0 || (eff_mean_temp < -9.0 && eff_warm_temp < 3.5) {
+            hydrology.biomes[i] = Biome::IceSheet;
+            continue;
+        }
 
-            // Оцениваем, сколько влаги пришло исключительно от дождей (без рек)
-            let pet = ((mean_temp + 10.0).max(2.0) * 0.013 * config.aridity_evap_scale).max(0.025);
-            let rain_only_sm = annual_precip / (annual_precip + pet * 0.7);
-            let river_moisture_surplus = (sm - rain_only_sm).max(0.0);
+        if soil == SoilType::Leptosol
+            && (elev > 0.22 + m_jit * 0.02 || max_slope > config.mountain_slope_threshold * 1.15)
+        {
+            hydrology.biomes[i] = Biome::AlpineBare;
+            continue;
+        }
 
-            let is_major_river = flow >= config.river_threshold * config.riparian_river_multiplier;
+        if eff_warm_temp < 8.5 || soil == SoilType::Gelisol {
+            hydrology.biomes[i] = if max_slope > config.mountain_slope_threshold {
+                Biome::AlpineBare
+            } else {
+                Biome::Tundra
+            };
+            continue;
+        }
 
-            // 6. Азональные биомы от переувлажнения почвы и рек:
-            // А) Болота и плавни (Wetland): почва перенасыщена водой на плоской глинистой равнине или в дельте
-            if max_slope < config.wetland_max_slope
-                && elev < 0.12
-                && (soil == SoilType::Gleysol || clay > 0.36)
-                && (sm > 0.74 - m_jit * 0.04 || (is_major_river && sm > 0.58))
-            {
-                *biome_out = Biome::Wetland;
-                return;
-            }
+        let sm = hydrology.soil_moisture[i];
+        let base_moisture_idx = (sm / (1.0 - sm * 0.68).max(0.15)).clamp(0.0, 2.5);
+        let moisture_idx = (base_moisture_idx * (1.0 + m_jit * 0.12)).clamp(0.0, 2.5);
 
-            // Б) Пойменный оазис / галерейный лес (RiparianOasis):
-            if eff_mean_temp > 5.0
-                && rain_only_sm < 0.28
-                && (river_moisture_surplus > 0.16 || (is_major_river && sm > 0.36))
-            {
-                *biome_out = Biome::RiparianOasis;
-                return;
-            }
+        let pet = ((mean_temp + 10.0).max(2.0) * 0.013 * config.aridity_evap_scale).max(0.025);
+        let rain_only_sm = annual_precip / (annual_precip + pet * 0.7);
+        let river_moisture_surplus = (sm - rain_only_sm).max(0.0);
 
-            // 7. Классификация Уиттекера по влажности почвы и сезонности
-            *biome_out = classify_whittaker_biome(
-                eff_mean_temp,
-                eff_warm_temp,
-                eff_cold_temp,
-                moisture_idx,
-                warm_precip,
-                cold_precip,
-                sand,
-                soil,
-            );
-        });
+        let is_major_river = flow >= config.river_threshold * config.riparian_river_multiplier;
+
+        if max_slope < config.wetland_max_slope
+            && elev < 0.12
+            && (soil == SoilType::Gleysol || clay > 0.36)
+            && (sm > 0.74 - m_jit * 0.04 || (is_major_river && sm > 0.58))
+        {
+            hydrology.biomes[i] = Biome::Wetland;
+            continue;
+        }
+
+        if eff_mean_temp > 5.0
+            && rain_only_sm < 0.28
+            && (river_moisture_surplus > 0.16 || (is_major_river && sm > 0.36))
+        {
+            hydrology.biomes[i] = Biome::RiparianOasis;
+            continue;
+        }
+
+        hydrology.biomes[i] = classify_whittaker_biome(
+            eff_mean_temp,
+            eff_warm_temp,
+            eff_cold_temp,
+            moisture_idx,
+            warm_precip,
+            cold_precip,
+            sand,
+            soil,
+        );
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -175,7 +167,6 @@ fn classify_whittaker_biome(
     sand: f32,
     soil: SoilType,
 ) -> Biome {
-    // --- А. ЭКСТРЕМАЛЬНО СУХИЕ ЗОНЫ (Пустыни и полупустыни) ---
     if moisture_idx < 0.18 {
         return if mean_temp < 11.0 || cold_temp < -5.0 {
             Biome::ColdDesert
@@ -196,7 +187,6 @@ fn classify_whittaker_biome(
         };
     }
 
-    // --- Б. БОРЕАЛЬНЫЙ ПОЯС (Холодная зима или прохладное лето -> Тайга / Степь) ---
     if mean_temp < 5.5 || cold_temp < -12.0 {
         return if moisture_idx < 0.55 && soil != SoilType::Podzol {
             Biome::TemperateGrassland
@@ -205,7 +195,6 @@ fn classify_whittaker_biome(
         };
     }
 
-    // --- В. УМЕРЕННЫЙ И СУБТРОПИЧЕСКИЙ ПОЯС (5.5°C .. 19.5°C) ---
     if mean_temp < 19.5 {
         let is_mediterranean = cold_temp > 1.5
             && warm_temp > 18.0
@@ -231,7 +220,6 @@ fn classify_whittaker_biome(
         };
     }
 
-    // --- Г. ТРОПИЧЕСКИЙ И ЭКВАТОРИАЛЬНЫЙ ПОЯС (> 19.5°C) ---
     let p_min = warm_precip.min(cold_precip);
     let p_max = warm_precip.max(cold_precip).max(1e-4);
     let seasonality_ratio = p_min / p_max;

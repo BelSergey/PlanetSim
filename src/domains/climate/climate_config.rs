@@ -104,7 +104,7 @@ impl Default for ClimateConfig {
             mountain_wind_barrier: 8.0,
 
             heat_advection_strength: 0.75,
-            equilibrium_iterations: 3,
+            equilibrium_iterations: 2,
 
             axial_tilt: 23.439281_f32.to_radians(),
             active_season: ClimateSeason::Spring,
@@ -118,16 +118,16 @@ impl Default for ClimateConfig {
 
             ocean_current_speed_multiplier: 0.15,
             boundary_current_multiplier: 4.0,
-            ocean_advection_rate: 0.90,
+            ocean_advection_rate: 1.50,
 
             geostrophic_multiplier: 2.0,
 
-            moisture_advection_strength: 2.0,
+            moisture_advection_strength: 1.0,
             orographic_rain_shadow: 7.0,
             ocean_evaporation_rate: 1.0,
-            subsidence_drying_strength: 0.5,
+            subsidence_drying_strength: 1.0,
             precipitation_rate: 1.0,
-            land_moisture_recycling: 0.60,
+            land_moisture_recycling: 0.40,
         }
     }
 }

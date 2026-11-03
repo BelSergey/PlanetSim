@@ -84,7 +84,7 @@ pub(super) fn compute_season_precipitation(
 
             if sp > 1e-5 && w_sum > 0.0 {
                 let my_elev = elevs[i].max(0.0);
-                let is_land = elevs[i] > 0.0;
+                let is_land = !geology.is_ocean_cell(i);
                 let vertical_scale = 0.025;
 
                 for j in start..end {
@@ -94,7 +94,7 @@ pub(super) fn compute_season_precipitation(
                         let n_elev = elevs[n_id].max(0.0);
                         let dh = (my_elev - n_elev).max(0.0);
 
-                        let coastal_step = if is_land && elevs[n_id] <= 0.0 {
+                        let coastal_step = if is_land && geology.is_ocean_cell(n_id) {
                             0.05
                         } else {
                             0.0
@@ -137,7 +137,7 @@ pub(super) fn compute_season_precipitation(
             let conv_lift = convergence * 1.30 * inversion_suppression;
 
             let dynamic_lift = cyclone_lift + conv_lift;
-            let surface_factor = if elevs[i] <= 0.0 {
+            let surface_factor = if geology.is_ocean_cell(i) {
                 0.75
             } else {
                 let eff_wet = surface_wetness[i].max(0.20);
@@ -223,7 +223,7 @@ pub(super) fn compute_season_precipitation(
             let norm_precip = (1.0 - (-raw_p * 2.20).exp()).clamp(0.0, 1.0);
             *precip_out = norm_precip;
 
-            if elevs[i] > 0.0 {
+            if !geology.is_ocean_cell(i) {
                 let local_boost = (norm_precip * 0.05 + surface_wetness[i] * 0.05) * recycling;
                 *humidity_out = (*humidity_out + local_boost).clamp(0.0, 1.0);
             }

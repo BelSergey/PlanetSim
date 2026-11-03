@@ -1,23 +1,37 @@
 // src/domains/climate/mod.rs
 
-pub mod climate_config;
+mod climate_config;
 pub mod climate_data;
 pub mod climate_palettes;
 pub mod climate_ui;
-pub mod solver;
+mod solver;
 
 pub use climate_config::ClimateConfig;
 pub use climate_data::{ClimateLayer, ClimateSeason};
-pub use solver::simulate_all_seasons;
+pub use solver::{simulate_all_seasons, ClimateSolverCache};
 
-use crate::astronomy::OrbitalSeasonState;
-use crate::simulation::clock::SimulationClock;
-use crate::world::{
-    pipeline::{PipelineSet, WorldPipeline},
-    states::AppState,
+use crate::{
+    astronomy::{AstronomyUpdateSet, OrbitalSeasonState},
+    simulation::clock::SimulationClock,
+    world::{
+        pipeline::{PipelineSet, WorldPipeline},
+        states::AppState,
+    },
 };
 use bevy::prelude::*;
 use climate_palettes::{draw_ocean_currents_gizmos, draw_wind_arrows_gizmos};
+
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct SeasonalControl {
+    /// true: use the orbital phase; false: respect ClimateConfig.active_season.
+    pub automatic: bool,
+}
+
+impl Default for SeasonalControl {
+    fn default() -> Self {
+        Self { automatic: true }
+    }
+}
 
 pub struct ClimatePlugin;
 
@@ -25,10 +39,12 @@ impl Plugin for ClimatePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ClimateConfig>()
             .init_resource::<ClimateLayer>()
+            .init_resource::<SeasonalControl>()
             .add_systems(
                 Update,
                 update_dynamic_seasonal_climate
                     .in_set(PipelineSet::Simulation)
+                    .after(AstronomyUpdateSet)
                     .run_if(in_state(AppState::InGame)),
             )
             .add_systems(
@@ -40,33 +56,32 @@ impl Plugin for ClimatePlugin {
     }
 }
 
-pub fn update_dynamic_seasonal_climate(
+fn update_dynamic_seasonal_climate(
     clock: Res<SimulationClock>,
+    control: Res<SeasonalControl>,
     season_state: Res<OrbitalSeasonState>,
-    time: Res<Time>,
+    time: Res<Time<Real>>,
     mut config: ResMut<ClimateConfig>,
     mut climate: ResMut<ClimateLayer>,
-    mut pipeline: ResMut<WorldPipeline>,      // ← снова нужен
+    mut pipeline: ResMut<WorldPipeline>,
     mut last_factor: Local<f32>,
     mut interpolate_cooldown: Local<f32>,
 ) {
-    if clock.paused || climate.spring.temperatures.is_empty() {
+    if !control.automatic
+        || clock.paused
+        || !clock.is_started()
+        || climate.spring.temperatures.is_empty()
+    {
         return;
     }
 
-    let dt = time.delta_secs();
-    *interpolate_cooldown += dt;
+    *interpolate_cooldown += time.delta_secs();
+    if (season_state.season_factor - *last_factor).abs() < 0.004 || *interpolate_cooldown < 0.08 {
+        return;
+    }
 
-    if (season_state.season_factor - *last_factor).abs() < 0.015 {
-        return;
-    }
-    if *interpolate_cooldown < 0.08 {
-        return;
-    }
     *interpolate_cooldown = 0.0;
     *last_factor = season_state.season_factor;
-
-    // Данные климата продолжают плавно интерполироваться (температуры, давления, ветра).
     climate.interpolate_from_orbit(season_state.season_factor);
 
     let new_season = if season_state.season_factor > 0.45 {
@@ -77,9 +92,10 @@ pub fn update_dynamic_seasonal_climate(
         ClimateSeason::Spring
     };
 
-    // А вот цвета вершин обновляем ТОЛЬКО на переходе сезона.
     if new_season != config.active_season {
         config.active_season = new_season;
-        pipeline.recolor_mesh = true;
     }
+
+    // The viewport's dirty-cell color cache makes these periodic updates affordable.
+    pipeline.recolor_mesh = true;
 }

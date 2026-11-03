@@ -52,7 +52,6 @@ pub(super) fn compute_season_moisture(
 
     let num_cells = topology.cells.len();
     let neighbor_ids = &precalc.neighbor_ids_flat;
-    let elevs = &geology.elevations;
     let offs = &precalc.neighbor_offsets;
     let hex_rad = precalc.avg_hex_rad;
     // Плоский список только апвинд-вкладов (w > 0)
@@ -74,9 +73,9 @@ pub(super) fn compute_season_moisture(
     // 1. Опорная скорость ветра по суше (чтобы трение о рельеф не останавливало перенос над материками)
     let (land_wind_sum, land_cnt) = wind_speed
         .par_iter()
-        .zip(elevs.par_iter())
-        .filter(|(_, elevation)| **elevation > 0.0)
-        .map(|(speed, _)| (*speed, 1usize))
+        .enumerate()
+        .filter(|(i, _)| !geology.is_ocean_cell(*i))
+        .map(|(_, speed)| (*speed, 1usize))
         .reduce(|| (0.0_f32, 0usize), |a, b| (a.0 + b.0, a.1 + b.1));
     let avg_wind = if land_cnt > 0 {
         (land_wind_sum / land_cnt as f32).max(1e-4)
@@ -97,7 +96,8 @@ pub(super) fn compute_season_moisture(
             // на линии пляжа (смешиваем приземную температуру уровня моря с широтным фоном океана
             // и вычитаем реальное горное охлаждение mountain_cooling)
             let sea_level_t = snap.temperatures[i] + precalc.mountain_cooling[i];
-            let cloud_layer_t = if elevs[i] <= 0.0 {
+            let is_ocean = geology.is_ocean_cell(i);
+            let cloud_layer_t = if is_ocean {
                 snap.temperatures[i]
             } else {
                 (sea_level_t * 0.45 + precalc.ocean_equilibrium[i] * 0.55)
@@ -108,7 +108,7 @@ pub(super) fn compute_season_moisture(
             let cap = saturation_capacity(cloud_layer_t);
             *capacity_out = cap;
 
-            if elevs[i] <= 0.0 {
+            if is_ocean {
                 let ice_bonus = if surface_wetness[i] < 0.20 { 0.20 } else { 1.0 };
                 let open_water =
                     open_water_fraction(snap.albedo[i], config.ocean_albedo) * ice_bonus;
@@ -130,7 +130,7 @@ pub(super) fn compute_season_moisture(
     let mean_courant = 0.58_f32;
     let total_advection_rad = (1.65 * config.moisture_advection_strength).clamp(0.30, 3.50);
     let num_steps =
-        ((total_advection_rad / (hex_rad * mean_courant)).round() as usize).clamp(35, 135);
+        ((total_advection_rad / (hex_rad * mean_courant)).round() as usize).clamp(35, 90);
     let inv_steps = 1.0 / num_steps as f32;
 
     let recycling_cfg = config.land_moisture_recycling.clamp(0.0, 0.95);
@@ -151,7 +151,7 @@ pub(super) fn compute_season_moisture(
             let step_rate = (norm_sp * 0.72).clamp(0.06, 0.82);
             let my_cap = scratch.moisture_capacity[i];
 
-            if elevs[i] <= 0.0 {
+            if geology.is_ocean_cell(i) {
                 let my_p = snap.pressure[i].clamp(-1.0, 1.0);
                 let open_water = open_water_fraction(snap.albedo[i], config.ocean_albedo);
                 let base_rh = 0.80 + 0.15 * open_water;
@@ -286,7 +286,7 @@ pub(super) fn compute_season_moisture(
             if my_p > 0.05 {
                 let cold_protection = smoothstep((8.0 - snap.temperatures[i]) / 25.0);
                 let sub_strength = config.subsidence_drying_strength.clamp(0.0, 2.0);
-                if elevs[i] <= 0.0 {
+                if geology.is_ocean_cell(i) {
                     // Над океаном антициклон лишь умеренно снижает влажность пограничного слоя
                     let ocean_drying = (my_p - 0.05) * 0.22 * sub_strength;
                     rh = (rh * (1.0 - ocean_drying)).max(0.45);
@@ -301,7 +301,7 @@ pub(super) fn compute_season_moisture(
                         rh -= (rh - dry_floor) * land_drying;
                     }
                 }
-            } else if my_p < -0.05 && elevs[i] > 0.0 {
+            } else if my_p < -0.05 && !geology.is_ocean_cell(i) {
                 // В циклонах восходящие потоки приближают воздух к точке росы
                 let cyclone_boost = (-my_p - 0.05) * 0.18;
                 rh = (rh + (1.0 - rh) * cyclone_boost).clamp(0.0, 1.0);
