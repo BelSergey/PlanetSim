@@ -143,7 +143,12 @@ pub fn compute_oceans_and_continentality(
     let ocean_scale = config.ocean_continentality_scale.max(0.01);
     let land_scale = config.land_continentality_scale.max(0.01);
 
-    for (i, c) in geology.continentality.iter_mut().enumerate().take(num_cells) {
+    for (i, c) in geology
+        .continentality
+        .iter_mut()
+        .enumerate()
+        .take(num_cells)
+    {
         *c = if is_ocean[i] {
             let physical_dist = dist_to_land_steps[i] as f32 * avg_hex_rad;
             let norm = (physical_dist / ocean_scale).min(1.0);

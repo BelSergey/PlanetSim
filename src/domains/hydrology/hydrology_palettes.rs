@@ -5,7 +5,7 @@ use crate::{
         palettes::{LegendEntry, MapLegend, rgb_u8},
         tectonics::tectonics_data::GeologyLayer,
     },
-    viewport::{Globe, ViewportViewConfig},
+    viewport::{Globe, ViewMode, ViewportViewConfig},
     world::{WorldConfig, topology::WorldTopology},
 };
 use bevy::color::{Color, ColorToComponents};
@@ -289,43 +289,65 @@ pub(super) fn draw_river_flow_gizmos(
     topology: Res<WorldTopology>,
     geology: Res<GeologyLayer>,
     hydrology: Res<HydrologyLayer>,
+    view_mode: Res<ViewMode>,
     view_config: Res<ViewportViewConfig>,
     world_config: Res<WorldConfig>,
-    globe_query: Query<&Transform, With<Globe>>,
+    globe_query: Query<&GlobalTransform, With<Globe>>,
 ) {
     if !view_config.show_river_flow || hydrology.river_flow_arrows.is_empty() {
         return;
     }
-    let Ok(globe_transform) = globe_query.single() else {
+    let Ok(global_transform) = globe_query.single() else {
         return;
     };
+    let globe_transform = global_transform.compute_transform();
 
-    let r = world_config.radius;
+    let radius = world_config.radius;
     let height_scale = world_config.height_scale();
-    let base_len = r * 0.002;
+    let base_len = radius * 0.002;
+    let is_flat_map = *view_mode == ViewMode::Map3D;
 
-    for &(i, dir, s) in &hydrology.river_flow_arrows {
-        let cell_pos = topology.cells[i].center;
-        let real_h = geology.elevations[i];
-        let elev = if view_config.flat_water && geology.is_ocean_cell(i) {
+    for &(i, dir, strength) in &hydrology.river_flow_arrows {
+        let Some(cell) = topology.cells.get(i) else {
+            continue;
+        };
+        let Some(&real_h) = geology.elevations.get(i) else {
+            continue;
+        };
+        let cell_dir = cell.center;
+        let elevation = if view_config.flat_water && geology.is_ocean_cell(i) {
             real_h.max(0.0)
         } else {
             real_h
         };
 
-        let local_start = cell_pos * (r + elev * height_scale + r * 0.005);
-        let arrow_len = base_len;
-        let local_end = local_start + dir * arrow_len;
+        let (local_start, local_end) = if is_flat_map {
+            let latitude = cell_dir.y.clamp(-1.0, 1.0).asin();
+            let longitude = cell_dir.x.atan2(cell_dir.z);
+            let east = Vec3::new(longitude.cos(), 0.0, -longitude.sin());
+            let north = cell_dir.cross(east).normalize_or_zero();
+            let cos_lat = latitude.cos().abs().max(0.18);
+            let tangent = Vec2::new(dir.dot(east), dir.dot(north));
+            let map_dir = Vec3::new(tangent.x / cos_lat, tangent.y, 0.0).normalize_or_zero();
+            let start = Vec3::new(
+                longitude * radius,
+                latitude * radius,
+                elevation * height_scale + radius * 0.012,
+            );
+            (start, start + map_dir * base_len)
+        } else {
+            let start = cell_dir * (radius + elevation * height_scale + radius * 0.005);
+            (start, start + dir * base_len)
+        };
 
         let world_start = globe_transform.transform_point(local_start);
         let world_end = globe_transform.transform_point(local_end);
-
-        let alpha = 0.35 + 0.55 * s;
-        let color = Color::srgb(1.0, 0.70 + 0.15 * s, 0.30 + 0.15 * s).with_alpha(alpha);
-
+        let alpha = 0.35 + 0.55 * strength;
+        let color =
+            Color::srgb(1.0, 0.70 + 0.15 * strength, 0.30 + 0.15 * strength).with_alpha(alpha);
         gizmos
             .arrow(world_start, world_end, color)
-            .with_tip_length(arrow_len * 2.0);
+            .with_tip_length(base_len * 2.0);
     }
 }
 

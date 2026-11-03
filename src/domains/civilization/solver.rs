@@ -323,9 +323,9 @@ pub fn step_civilization_simulation(
             let mut sum_weighted = 0.0_f32;
             let mut aff_sum = 0.0_f32;
             for (f_idx, &env_val) in env_factors.iter().enumerate() {
-    let w = spec.env_affinity[f_idx];
-    let mastery_mult = if my_ideas.has_bit(f_idx) { 1.30 } else { 0.95 };
-    let val = env_val * w * mastery_mult;
+                let w = spec.env_affinity[f_idx];
+                let mastery_mult = if my_ideas.has_bit(f_idx) { 1.30 } else { 0.95 };
+                let val = env_val * w * mastery_mult;
                 if val > max_weighted {
                     max_weighted = val;
                 }
@@ -345,10 +345,10 @@ pub fn step_civilization_simulation(
 
             let mut cross_push = 0.0_f32;
             for (m, &w_km) in cross_matrix[k].iter().enumerate() {
-    if m != k {
-        cross_push += w_km * cur.strength[m];
-    }
-}
+                if m != k {
+                    cross_push += w_km * cur.strength[m];
+                }
+            }
 
             let local_capacity = if k == 0 {
                 (env_cap * 1.15 + cross_push * 0.35 + tech_cap_bonus).clamp(0.0, 1.0)

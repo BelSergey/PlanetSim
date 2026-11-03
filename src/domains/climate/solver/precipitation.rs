@@ -160,21 +160,43 @@ pub(super) fn compute_season_precipitation(
     let smooth_iters = ((0.07 / hex_rad).round() as usize).clamp(4, 18);
     let diff_fraction = (smooth_iters as f32 * inv_cloud_steps).clamp(0.02, 0.25);
 
+    #[derive(Clone, Copy, Default)]
+    struct CloudAdvection {
+        step_rate: f32,
+        build_rate: f32,
+        decay_rate: f32,
+        chaos_mix: f32,
+    }
+
+    let mut cloud_params = vec![CloudAdvection::default(); num_cells];
+    let build_rate_const = (5.5 * inv_cloud_steps).clamp(0.03, 0.45);
+    cloud_params.par_iter_mut().enumerate().for_each(|(i, p)| {
+        let sp = wind_speed[i];
+        let norm_sp = (sp / ref_wind).clamp(0.08, 1.45).sqrt();
+        let step_rate = (norm_sp * 0.72).clamp(0.08, 0.85);
+        let travel_step = norm_sp * inv_cloud_steps;
+        let my_p = pressures[i].clamp(-1.0, 1.0);
+        let chaos_mix = (0.45 - my_p * 0.20) * diff_fraction;
+        let anticyclone_dry = if my_p > 0.0 { 1.0 + my_p * 2.2 } else { 0.65 };
+        let decay_rate = (0.90 * travel_step * anticyclone_dry).clamp(0.003, 0.16);
+        *p = CloudAdvection {
+            step_rate,
+            build_rate: build_rate_const,
+            decay_rate,
+            chaos_mix,
+        };
+    });
+
     for _ in 0..cloud_steps {
         std::mem::swap(&mut snap.precipitation, &mut scratch.prev_precipitation);
         let prev_c = &scratch.prev_precipitation;
         let out_c = &mut snap.precipitation;
 
         out_c.par_iter_mut().enumerate().for_each(|(i, c_out)| {
-            let sp = wind_speed[i];
-            let my_p = pressures[i].clamp(-1.0, 1.0);
-
-            let norm_sp = (sp / ref_wind).clamp(0.08, 1.45).sqrt();
-            let step_rate = (norm_sp * 0.72).clamp(0.08, 0.85);
-            let travel_step = norm_sp * inv_cloud_steps;
+            let cp = cloud_params[i];
             let w_sum = upwind_weight_sum[i];
 
-            let incoming_c = if sp > 1e-5 && w_sum > 0.0 {
+            let incoming_c = if wind_speed[i] > 1e-5 && w_sum > 0.0 {
                 let mut upwind_c = 0.0_f32;
                 for k in upwind_offs[i] as usize..upwind_offs[i + 1] as usize {
                     upwind_c += prev_c[upwind_nbrs[k] as usize] * upwind_w[k];
@@ -184,31 +206,26 @@ pub(super) fn compute_season_precipitation(
                 prev_c[i]
             };
 
-            let mut c = prev_c[i] * (1.0 - step_rate) + incoming_c * step_rate;
+            let mut c = prev_c[i] * (1.0 - cp.step_rate) + incoming_c * cp.step_rate;
 
             let start = offs[i];
             let end = offs[i + 1];
             let degree = end - start;
             if degree > 0 {
-                let chaos_mix = (0.45 - my_p * 0.20) * diff_fraction;
                 let mut sum = 0.0f32;
                 for j in start..end {
                     sum += prev_c[neighbor_ids[j] as usize];
                 }
                 let nbr_c = sum / degree as f32;
-                c = c * (1.0 - chaos_mix) + nbr_c * chaos_mix;
+                c = c * (1.0 - cp.chaos_mix) + nbr_c * cp.chaos_mix;
             }
 
             let src = cloud_source[i];
             if src > c {
-                let build_rate = (5.5 * inv_cloud_steps).clamp(0.03, 0.45);
-                c += (src - c) * build_rate;
+                c += (src - c) * cp.build_rate;
             } else {
-                let anticyclone_dry = if my_p > 0.0 { 1.0 + my_p * 2.2 } else { 0.65 };
-                let decay_rate = (0.90 * travel_step * anticyclone_dry).clamp(0.003, 0.16);
-                c += (src - c) * decay_rate;
+                c += (src - c) * cp.decay_rate;
             }
-
             *c_out = c;
         });
     }

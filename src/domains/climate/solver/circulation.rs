@@ -262,7 +262,7 @@ pub(super) fn compute_ocean_currents(
             // 4. Граничные течения
             let mut coast_normal = Vec3::ZERO;
             for &n_id_u32 in &neighbor_ids[start..end] {
-    let n_id = n_id_u32 as usize;
+                let n_id = n_id_u32 as usize;
                 if !geology.is_ocean_cell(n_id) {
                     let raw_dir = pos - topology.cells[n_id].center;
                     let tangent_from_coast = (raw_dir - pos * raw_dir.dot(pos)).normalize_or_zero();

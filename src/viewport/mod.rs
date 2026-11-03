@@ -44,12 +44,13 @@ use crate::{
 };
 use bevy::{light::NotShadowCaster, prelude::*};
 use camera_3d::{
-    SystemInertia, keyboard_zoom, reset_zoom, rotate_system, set_default_camera_zoom, zoom_camera,
+    SystemInertia, apply_view_mode_camera, keyboard_zoom, reset_zoom, rotate_system,
+    set_default_camera_zoom, zoom_camera,
 };
 use hotkeys::hotkey_controls;
 use mesh_globe::{
     MeshColorLayout, build_globe_mesh, build_river_mesh, compute_color_layout,
-    recolor_globe_mesh_range, reposition_globe_mesh,
+    project_river_mesh_to_map3d, recolor_globe_mesh_range, reposition_globe_mesh,
 };
 use palettes::build_space_colors;
 use std::time::Instant;
@@ -62,12 +63,39 @@ pub struct Globe;
 #[derive(Component)]
 pub struct StarSystemRoot;
 
-#[derive(Resource, Default, PartialEq, Eq, Clone, Copy)]
+/// Режим главного окна.
+#[derive(Resource, Default, PartialEq, Eq, Clone, Copy, Debug)]
 pub enum ViewMode {
+    /// Полная орбитальная система с автоматическим осевым вращением.
     #[default]
-    Globe3D,
-    _Flat2D,
+    StarSystem,
+    /// Неподвижный глобус с движущимся направлением солнечного света.
+    GlobeSolo,
+    /// Эквидистантная цилиндрическая 3D-развёртка рельефа.
+    Map3D,
 }
+
+/// Ракурс плоской 3D-карты.
+#[derive(Resource, Default, PartialEq, Eq, Clone, Copy, Debug)]
+pub enum MapCameraAngle {
+    #[default]
+    TopDown,
+    Isometric,
+}
+
+/// Способ освещения в режимах отдельного глобуса и 3D-карты.
+#[derive(Resource, Default, PartialEq, Eq, Clone, Copy, Debug)]
+pub enum ViewportLightingMode {
+    /// Направленный источник света вращается по суточному циклу и сезонам.
+    #[default]
+    Solar,
+    /// Равномерный свет по всей поверхности без дневной/ночной стороны.
+    Global,
+}
+
+/// Подложка прямоугольной карты, закрывающая пустые участки у полюсов и шва.
+#[derive(Component)]
+pub struct MapBackground;
 
 #[derive(Resource, Default, PartialEq, Eq, Clone, Copy)]
 pub enum MapOverlay {
@@ -143,7 +171,15 @@ impl Default for ViewportViewConfig {
 struct ViewportMeshCache {
     color_layout: Option<MeshColorLayout>,
     /// Quantized colors avoid rewriting vertices for imperceptible float noise.
-    last_space_colors_u8: Option<Vec<[u8; 4]>>,
+    last_colors_u8: Option<Vec<[u8; 4]>>,
+}
+
+/// Группирует локальные кэши mesh-системы, чтобы не превышать лимит параметров Bevy.
+#[derive(Default)]
+struct ViewportMeshLocalState {
+    deferred_mesh_drops: Vec<Handle<Mesh>>,
+    cache: ViewportMeshCache,
+    last_view_mode: Option<ViewMode>,
 }
 
 pub struct ViewportPlugin;
@@ -151,6 +187,8 @@ pub struct ViewportPlugin;
 impl Plugin for ViewportPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ViewMode>()
+            .init_resource::<MapCameraAngle>()
+            .init_resource::<ViewportLightingMode>()
             .init_resource::<MapOverlay>()
             .init_resource::<ViewportViewConfig>()
             .init_resource::<SunVisualConfig>()
@@ -159,15 +197,21 @@ impl Plugin for ViewportPlugin {
             .add_systems(
                 Update,
                 (
+                    apply_view_mode_camera,
                     rotate_system,
                     zoom_camera,
                     hotkey_controls,
                     keyboard_zoom,
                     reset_zoom,
                 )
+                    .chain()
                     .in_set(PipelineSet::Input),
             )
             .add_systems(Update, sync_viewport_mesh.in_set(PipelineSet::Render))
+            .add_systems(
+                Update,
+                (sync_map_background, sync_viewport_lighting).in_set(PipelineSet::Render),
+            )
             .add_systems(
                 Update,
                 draw_axis_and_equator_gizmos.in_set(PipelineSet::Render),
@@ -177,12 +221,14 @@ impl Plugin for ViewportPlugin {
 
 fn setup_scene(
     mut commands: Commands,
+    world_config: Res<WorldConfig>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let globe_material = materials.add(StandardMaterial {
         base_color: Color::WHITE,
         perceptual_roughness: 0.85,
+        unlit: true,
         ..default()
     });
     let sun_material = materials.add(StandardMaterial {
@@ -197,6 +243,13 @@ fn setup_scene(
         metallic: 0.05,
         ..default()
     });
+    let map_background_material = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.34, 0.49, 0.62),
+        perceptual_roughness: 1.0,
+        unlit: true,
+        ..default()
+    });
+    let map_background_mesh = meshes.add(Rectangle::new(1.0, 1.0));
 
     let sun_mesh = meshes.add(Sphere::new(1.0).mesh().uv(48, 32));
     let root = commands
@@ -226,6 +279,23 @@ fn setup_scene(
                 Visibility::Inherited,
             ))
             .with_children(|planet| {
+                let map_radius = world_config.radius;
+                planet.spawn((
+                    Mesh3d(map_background_mesh.clone()),
+                    MeshMaterial3d(map_background_material.clone()),
+                    MapBackground,
+                    Transform {
+                        translation: Vec3::new(0.0, 0.0, -map_radius * 0.03),
+                        scale: Vec3::new(
+                            std::f32::consts::TAU * map_radius,
+                            std::f32::consts::PI * map_radius,
+                            1.0,
+                        ),
+                        ..default()
+                    },
+                    Visibility::Hidden,
+                ));
+
                 planet
                     .spawn((
                         Mesh3d::default(),
@@ -252,10 +322,88 @@ fn setup_scene(
             },
             Sunlight,
             Transform::from_xyz(10.0, 10.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y),
+            Visibility::Inherited,
         ));
     });
 
     commands.spawn((Camera3d::default(), Transform::from_xyz(0.0, 0.0, 9.5)));
+}
+
+/// Подгоняет подложку карты под актуальный радиус и высотный диапазон.
+fn sync_map_background(
+    view_mode: Res<ViewMode>,
+    world_config: Res<WorldConfig>,
+    geology: Res<GeologyLayer>,
+    mut background_query: Query<(&mut Transform, &mut Visibility), With<MapBackground>>,
+) {
+    if !view_mode.is_changed() && !world_config.is_changed() && !geology.is_changed() {
+        return;
+    }
+
+    let should_show = *view_mode == ViewMode::Map3D;
+    let min_elevation = geology.elevations.iter().copied().fold(0.0_f32, f32::min);
+    let radius = world_config.radius.max(0.01);
+    let background_z = min_elevation * world_config.height_scale() - radius * 0.025;
+    let target_visibility = if should_show {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
+    };
+
+    for (mut transform, mut visibility) in &mut background_query {
+        let target_scale = Vec3::new(
+            std::f32::consts::TAU * radius,
+            std::f32::consts::PI * radius,
+            1.0,
+        );
+        if transform.scale.distance_squared(target_scale) > 1e-8 {
+            transform.scale = target_scale;
+        }
+        if (transform.translation.z - background_z).abs() > 1e-5 {
+            transform.translation.z = background_z;
+        }
+        if *visibility != target_visibility {
+            *visibility = target_visibility;
+        }
+    }
+}
+
+/// Переключает направленное Солнце и равномерное глобальное освещение.
+fn sync_viewport_lighting(
+    view_mode: Res<ViewMode>,
+    lighting_mode: Res<ViewportLightingMode>,
+    mut ambient: ResMut<GlobalAmbientLight>,
+    mut sunlight_query: Query<&mut Visibility, With<Sunlight>>,
+    mut default_ambient: Local<Option<(Color, f32)>>,
+) {
+    let baseline = default_ambient
+        .get_or_insert((ambient.color, ambient.brightness))
+        .to_owned();
+    let use_global =
+        *view_mode != ViewMode::StarSystem && *lighting_mode == ViewportLightingMode::Global;
+
+    let (target_color, target_brightness) = if use_global {
+        (Color::WHITE, 2000.0)
+    } else {
+        baseline
+    };
+    if ambient.color != target_color {
+        ambient.color = target_color;
+    }
+    if (ambient.brightness - target_brightness).abs() > 1e-3 {
+        ambient.brightness = target_brightness;
+    }
+
+    let target_visibility = if use_global {
+        Visibility::Hidden
+    } else {
+        Visibility::Inherited
+    };
+    for mut visibility in &mut sunlight_query {
+        if *visibility != target_visibility {
+            *visibility = target_visibility;
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -270,6 +418,7 @@ fn sync_viewport_mesh(
     civ: Res<CivilizationLayer>,
     civ_config: Res<CivilizationConfig>,
     overlay: Res<MapOverlay>,
+    view_mode: Res<ViewMode>,
     view_config: Res<ViewportViewConfig>,
     mut globe_query: Query<&mut Mesh3d, (With<Globe>, Without<RiverOverlayMesh>)>,
     mut river_query: Query<
@@ -277,10 +426,15 @@ fn sync_viewport_mesh(
         (With<RiverOverlayMesh>, Without<Globe>),
     >,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut deferred_mesh_drops: Local<Vec<Handle<Mesh>>>,
-    mut cache: Local<ViewportMeshCache>,
+    mut local_state: Local<ViewportMeshLocalState>,
 ) {
-    deferred_mesh_drops.clear();
+    local_state.deferred_mesh_drops.clear();
+
+    if local_state.last_view_mode != Some(*view_mode) {
+        local_state.last_view_mode = Some(*view_mode);
+        pipeline.rebuild_mesh = true;
+        pipeline.rebuild_rivers = true;
+    }
 
     if let Ok((_, mut river_visibility)) = river_query.single_mut() {
         let desired = if view_config.show_rivers && !hydrology.flow_accumulation.is_empty() {
@@ -305,36 +459,41 @@ fn sync_viewport_mesh(
     }
 
     let height_scale = world_config.height_scale();
+    let is_flat_map = *view_mode == ViewMode::Map3D;
     let mut mesh_updated = false;
 
     if let Ok(mut mesh_handle) = globe_query.single_mut() {
         if pipeline.rebuild_mesh {
+            // --- ПОЛНАЯ ПЕРЕСБОРКА МЕША ---
             let colors =
                 compute_overlay_colors(&overlay, &geology, &climate, &hydrology, &civ, &civ_config);
+            
             let mesh = build_globe_mesh(
                 &topology,
                 &geology.elevations,
                 &geology.is_ocean,
                 view_config.flat_water,
+                is_flat_map,
                 &colors,
                 world_config.radius,
                 height_scale,
             );
-            deferred_mesh_drops.push(mesh_handle.0.clone());
+            local_state.deferred_mesh_drops.push(mesh_handle.0.clone());
             mesh_handle.0 = meshes.add(mesh);
-            cache.color_layout = Some(compute_color_layout(&topology, &geology.elevations));
-            cache.last_space_colors_u8 = if *overlay == MapOverlay::SpaceView {
-                Some(quantize_colors(&colors))
-            } else {
-                None
-            };
+            
+            local_state.cache.color_layout = Some(compute_color_layout(
+                &topology,
+                &geology.elevations,
+                is_flat_map,
+            ));
+            
+            // Кэшируем цвета при полной пересборке для любого слоя
+            local_state.cache.last_colors_u8 = Some(quantize_colors(&colors));
             mesh_updated = true;
         } else {
-            // Prepare color data before requesting mutable access to the mesh asset.
-            // Assets::get_mut marks an asset as changed, so avoid it when quantized
-            // SpaceView colors are identical and there is no position update.
+            // --- ЧАСТИЧНОЕ ОБНОВЛЕНИЕ (ПЕРЕКРАСКА ИЛИ СДВИГ ВЫСОТ) ---
             let mut colors_update: Option<(Vec<[f32; 4]>, Option<Vec<bool>>)> = None;
-            let mut current_space_colors: Option<Vec<[u8; 4]>> = None;
+            let mut new_colors_cache: Option<Vec<[u8; 4]>> = None;
 
             if pipeline.recolor_mesh {
                 let colors = compute_overlay_colors(
@@ -346,9 +505,14 @@ fn sync_viewport_mesh(
                     &civ_config,
                 );
 
-                if *overlay == MapOverlay::SpaceView {
-                    let current = quantize_colors(&colors);
-                    let dirty = cache.last_space_colors_u8.as_ref().and_then(|previous| {
+                // Квантуем цвета в u8 (0..255), чтобы отсечь микроскопические изменения float
+                let current = quantize_colors(&colors);
+                
+                let dirty = local_state
+                    .cache
+                    .last_colors_u8
+                    .as_ref()
+                    .and_then(|previous| {
                         (previous.len() == current.len()).then(|| {
                             previous
                                 .iter()
@@ -357,16 +521,14 @@ fn sync_viewport_mesh(
                                 .collect::<Vec<_>>()
                         })
                     });
-                    let any_dirty = dirty
-                        .as_ref()
-                        .is_none_or(|mask| mask.iter().any(|&changed| changed));
+                    
+                let any_dirty = dirty
+                    .as_ref()
+                    .is_none_or(|mask| mask.iter().any(|&changed| changed));
 
-                    if any_dirty {
-                        current_space_colors = Some(current);
-                        colors_update = Some((colors, dirty));
-                    }
-                } else {
-                    colors_update = Some((colors, None));
+                if any_dirty {
+                    new_colors_cache = Some(current);
+                    colors_update = Some((colors, dirty));
                 }
             }
 
@@ -378,6 +540,7 @@ fn sync_viewport_mesh(
                             &geology.elevations,
                             &geology.is_ocean,
                             view_config.flat_water,
+                            is_flat_map,
                             world_config.radius,
                             height_scale,
                         );
@@ -386,12 +549,16 @@ fn sync_viewport_mesh(
                     }
 
                     if let Some((colors, dirty)) = colors_update {
-                        if cache.color_layout.is_none() {
-                            cache.color_layout =
-                                Some(compute_color_layout(&topology, &geology.elevations));
+                        if local_state.cache.color_layout.is_none() {
+                            local_state.cache.color_layout = Some(compute_color_layout(
+                                &topology,
+                                &geology.elevations,
+                                is_flat_map,
+                            ));
                         }
 
-                        if let Some(layout) = cache.color_layout.as_ref() {
+                        if let Some(layout) = local_state.cache.color_layout.as_ref() {
+                            // Перекрашиваем только dirty-клетки (или все, если dirty == None)
                             recolor_globe_mesh_range(
                                 &mut mesh,
                                 &topology,
@@ -401,10 +568,9 @@ fn sync_viewport_mesh(
                                 topology.cells.len(),
                                 dirty.as_deref(),
                             );
-                            cache.last_space_colors_u8 = current_space_colors;
-                            if *overlay != MapOverlay::SpaceView {
-                                cache.last_space_colors_u8 = None;
-                            }
+                            
+                            // Обновляем кэш новыми цветами
+                            local_state.cache.last_colors_u8 = new_colors_cache;
                             mesh_updated = true;
                         }
                     }
@@ -413,9 +579,10 @@ fn sync_viewport_mesh(
         }
     }
 
+    // --- ОБНОВЛЕНИЕ МЕША РЕК ---
     if pipeline.rebuild_mesh || pipeline.reposition_mesh || pipeline.rebuild_rivers {
         if let Ok((mut river_handle, _)) = river_query.single_mut() {
-            let river_mesh = build_river_mesh(
+            let mut river_mesh = build_river_mesh(
                 &topology,
                 &geology,
                 &hydrology,
@@ -424,11 +591,15 @@ fn sync_viewport_mesh(
                 world_config.radius,
                 height_scale,
             );
-            deferred_mesh_drops.push(river_handle.0.clone());
+            if is_flat_map {
+                project_river_mesh_to_map3d(&mut river_mesh, world_config.radius);
+            }
+            local_state.deferred_mesh_drops.push(river_handle.0.clone());
             river_handle.0 = meshes.add(river_mesh);
         }
     }
 
+    // Сбрасываем флаги пайплайна
     pipeline.rebuild_mesh = false;
     pipeline.reposition_mesh = false;
     pipeline.recolor_mesh = false;
@@ -505,6 +676,7 @@ fn compute_overlay_colors(
 
 pub fn draw_axis_and_equator_gizmos(
     mut gizmos: Gizmos,
+    view_mode: Res<ViewMode>,
     view_config: Res<ViewportViewConfig>,
     world_config: Res<WorldConfig>,
     globe_query: Query<&GlobalTransform, With<Globe>>,
@@ -517,6 +689,20 @@ pub fn draw_axis_and_equator_gizmos(
     };
     let transform = global_transform.compute_transform();
     let radius = world_config.radius;
+
+    if *view_mode == ViewMode::Map3D {
+        let z = radius * 0.025;
+        let left = transform.transform_point(Vec3::new(-std::f32::consts::PI * radius, 0.0, z));
+        let right = transform.transform_point(Vec3::new(std::f32::consts::PI * radius, 0.0, z));
+        let south =
+            transform.transform_point(Vec3::new(0.0, -std::f32::consts::FRAC_PI_2 * radius, z));
+        let north =
+            transform.transform_point(Vec3::new(0.0, std::f32::consts::FRAC_PI_2 * radius, z));
+        gizmos.line(left, right, Color::srgba(0.2, 0.8, 1.0, 0.9));
+        gizmos.arrow(south, north, Color::srgba(1.0, 0.2, 0.2, 0.9));
+        return;
+    }
+
     let top = transform.transform_point(Vec3::Y * (radius + 1.0));
     let bottom = transform.transform_point(Vec3::NEG_Y * (radius + 1.0));
     gizmos.arrow(bottom, top, Color::srgba(1.0, 0.2, 0.2, 0.9));

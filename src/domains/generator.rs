@@ -255,25 +255,24 @@ pub fn spawn_generation_task(
     };
 
     let coupled = h_config.coupled_climate_feedback;
-// Feedback в первичной генерации может быть отложен (см. HydrologyConfig).
-let should_run_feedback_on_initial =
-    coupled && !h_config.defer_initial_feedback;
-let tectonics_steps = if evolve {
-    TECTONICS_STEPS - 1
-} else {
-    TECTONICS_STEPS
-};
-let base_steps = match stage {
-    PipelineStage::Tectonics => tectonics_steps + CLIMATE_STEPS + HYDROLOGY_STEPS,
-    PipelineStage::Climate => CLIMATE_STEPS + HYDROLOGY_STEPS,
-    PipelineStage::Hydrology => HYDROLOGY_STEPS,
-};
-// total_steps — это только для прогресс-бара. Точность здесь не критична.
-let total_steps = if should_run_feedback_on_initial {
-    base_steps + COUPLED_EXTRA_STEPS
-} else {
-    base_steps
-};
+    // Feedback в первичной генерации может быть отложен (см. HydrologyConfig).
+    let should_run_feedback_on_initial = coupled && !h_config.defer_initial_feedback;
+    let tectonics_steps = if evolve {
+        TECTONICS_STEPS - 1
+    } else {
+        TECTONICS_STEPS
+    };
+    let base_steps = match stage {
+        PipelineStage::Tectonics => tectonics_steps + CLIMATE_STEPS + HYDROLOGY_STEPS,
+        PipelineStage::Climate => CLIMATE_STEPS + HYDROLOGY_STEPS,
+        PipelineStage::Hydrology => HYDROLOGY_STEPS,
+    };
+    // total_steps — это только для прогресс-бара. Точность здесь не критична.
+    let total_steps = if should_run_feedback_on_initial {
+        base_steps + COUPLED_EXTRA_STEPS
+    } else {
+        base_steps
+    };
 
     let logger = GenerationLogger::new(total_steps);
     let logger_clone = logger.clone();
@@ -421,37 +420,37 @@ let total_steps = if should_run_feedback_on_initial {
                 &logger_clone,
             );
 
-// Проход 2: Обратная связь (1 шаг + 3 шага климата + 5 шагов биосферы)
-// Пропускается при defer_initial_feedback = true (по умолчанию).
-// Пользователь может запустить кнопкой в Hydrology UI.
-if should_run_feedback_on_initial {
-    logger_clone.start_step("Обратная связь: влияние биомов и озёр на климат...");
-    apply_surface_feedback_to_climate(
-        &geology_ref,
-        &mut climate,
-        &hydrology,
-        &c_config,
-        &h_config,
-    );
-    simulate_all_seasons(
-        &topology,
-        &geology_ref,
-        &mut climate,
-        &c_config,
-        seed,
-        &logger_clone,
-        Some(&mut climate_cache),
-    );
-    simulate_hydrology(
-        &topology,
-        &geology_ref,
-        &climate,
-        &mut hydrology,
-        &h_config,
-        seed,
-        &logger_clone,
-    );
-}
+            // Проход 2: Обратная связь (1 шаг + 3 шага климата + 5 шагов биосферы)
+            // Пропускается при defer_initial_feedback = true (по умолчанию).
+            // Пользователь может запустить кнопкой в Hydrology UI.
+            if should_run_feedback_on_initial {
+                logger_clone.start_step("Обратная связь: влияние биомов и озёр на климат...");
+                apply_surface_feedback_to_climate(
+                    &geology_ref,
+                    &mut climate,
+                    &hydrology,
+                    &c_config,
+                    &h_config,
+                );
+                simulate_all_seasons(
+                    &topology,
+                    &geology_ref,
+                    &mut climate,
+                    &c_config,
+                    seed,
+                    &logger_clone,
+                    Some(&mut climate_cache),
+                );
+                simulate_hydrology(
+                    &topology,
+                    &geology_ref,
+                    &climate,
+                    &mut hydrology,
+                    &h_config,
+                    seed,
+                    &logger_clone,
+                );
+            }
 
             Some(climate)
         };

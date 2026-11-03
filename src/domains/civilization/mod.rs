@@ -8,7 +8,7 @@ pub mod solver;
 
 use bevy::prelude::*;
 
-pub use civ_config::{CivilizationConfig};
+pub use civ_config::CivilizationConfig;
 pub use civ_data::{CivilizationLayer, SocLayerKind};
 pub use solver::{prepare_civilization_substrate, step_civilization_simulation};
 

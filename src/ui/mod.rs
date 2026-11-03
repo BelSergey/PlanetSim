@@ -10,7 +10,7 @@ use bevy_egui::{EguiPlugin, EguiPrimaryContextPass};
 use crate::{
     astronomy::Sun,
     domains::tectonics::GeologyLayer,
-    viewport::{Globe, SunVisualConfig},
+    viewport::{Globe, SunVisualConfig, ViewMode},
     world::states::AppState,
 };
 
@@ -61,6 +61,7 @@ fn manage_scene_visibility(
     state: Res<State<AppState>>,
     geology: Res<GeologyLayer>,
     sun_config: Res<SunVisualConfig>,
+    view_mode: Res<ViewMode>,
     mut globe_query: Query<&mut Visibility, (With<Globe>, Without<Sun>)>,
     mut sun_query: Query<&mut Visibility, (With<Sun>, Without<Globe>)>,
 ) {
@@ -70,7 +71,8 @@ fn manage_scene_visibility(
     } else {
         Visibility::Hidden
     };
-    let sun_visibility = if planet_ready && sun_config.visible {
+    let sun_visibility = if planet_ready && sun_config.visible && *view_mode == ViewMode::StarSystem
+    {
         Visibility::Inherited
     } else {
         Visibility::Hidden

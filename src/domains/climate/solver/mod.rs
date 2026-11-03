@@ -374,7 +374,7 @@ pub fn simulate_all_seasons(
     config: &ClimateConfig,
     seed: u32,
     logger: &GenerationLogger,
-    cache: Option<&mut ClimateSolverCache>,   // ← НОВЫЙ параметр
+    cache: Option<&mut ClimateSolverCache>, // ← НОВЫЙ параметр
 ) {
     let num_cells = topology.cells.len();
     if geology.continentality.len() == num_cells {
@@ -440,29 +440,57 @@ pub fn simulate_all_seasons(
     rayon::scope(|s| {
         s.spawn(|_| {
             simulate_single_season(
-                0.0, topology, geology, cont, surf_alb, surf_wet, surf_hc, config, precalc,
-                scratch_spring, spring,
+                0.0,
+                topology,
+                geology,
+                cont,
+                surf_alb,
+                surf_wet,
+                surf_hc,
+                config,
+                precalc,
+                scratch_spring,
+                spring,
             );
         });
         s.spawn(|_| {
             simulate_single_season(
-                1.0, topology, geology, cont, surf_alb, surf_wet, surf_hc, config, precalc,
-                scratch_summer, summer,
+                1.0,
+                topology,
+                geology,
+                cont,
+                surf_alb,
+                surf_wet,
+                surf_hc,
+                config,
+                precalc,
+                scratch_summer,
+                summer,
             );
         });
         s.spawn(|_| {
             simulate_single_season(
-                -1.0, topology, geology, cont, surf_alb, surf_wet, surf_hc, config, precalc,
-                scratch_winter, winter,
+                -1.0,
+                topology,
+                geology,
+                cont,
+                surf_alb,
+                surf_wet,
+                surf_hc,
+                config,
+                precalc,
+                scratch_winter,
+                winter,
             );
         });
     });
 
-logger.start_step("Климат: индексация 3D-стрелок ветров и течений...");
-for snap in [spring, summer, winter] {
-    snap.wind_arrows_cache = build_arrow_cache(topology, &snap.winds_3d, None, 35);
-    snap.current_arrows_cache = build_arrow_cache(topology, &snap.ocean_currents, Some(geology), 35);
-}
+    logger.start_step("Климат: индексация 3D-стрелок ветров и течений...");
+    for snap in [spring, summer, winter] {
+        snap.wind_arrows_cache = build_arrow_cache(topology, &snap.winds_3d, None, 35);
+        snap.current_arrows_cache =
+            build_arrow_cache(topology, &snap.ocean_currents, Some(geology), 35);
+    }
 
     climate.apply_active_season(config.active_season);
 }
@@ -494,13 +522,12 @@ fn simulate_single_season(
     surface_heat_capacity: &[f32],
     config: &ClimateConfig,
     precalc: &SolverPrecalc,
-    mut scratch: &mut SeasonScratch,   // ← было: создавался внутри
+    mut scratch: &mut SeasonScratch, // ← было: создавался внутри
     snap: &mut SeasonalSnapshot,
 ) {
     let sun_lat = config.axial_tilt * season_mult;
     let num_cells = topology.cells.len();
     let (sin_sun, cos_sun) = sun_lat.sin_cos();
-
 
     // --- 1. Первичная оценка температуры от Солнца ---
     let mountain_cooling = &precalc.mountain_cooling;
@@ -888,13 +915,13 @@ fn build_arrow_cache(
     let mut best_cell = vec![u32::MAX; max_buckets];
     let mut best_speed = vec![0.0f32; max_buckets];
 
-for (i, &v) in vectors.iter().enumerate().take(num_cells) {
-    if let Some(geo) = geology
-        && !geo.is_ocean_cell(i)
-    {
-        continue;
-    }
-    let speed = v.length();
+    for (i, &v) in vectors.iter().enumerate().take(num_cells) {
+        if let Some(geo) = geology
+            && !geo.is_ocean_cell(i)
+        {
+            continue;
+        }
+        let speed = v.length();
         if speed < 1e-4 {
             continue;
         }
@@ -909,8 +936,7 @@ for (i, &v) in vectors.iter().enumerate().take(num_cells) {
         let lon_per_band = (lat_bins as f32 * cos_lat).round().max(1.0) as usize;
 
         let lon_norm = (cell.lat_lon.y + PI) / (2.0 * PI);
-        let lon_bin =
-            (lon_norm * lon_per_band as f32).min(lon_per_band as f32 - 0.001) as usize;
+        let lon_bin = (lon_norm * lon_per_band as f32).min(lon_per_band as f32 - 0.001) as usize;
 
         let bucket = lat_bin * lat_bins + lon_bin;
         if bucket < max_buckets && speed > best_speed[bucket] {

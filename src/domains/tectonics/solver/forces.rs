@@ -64,10 +64,9 @@ pub fn update_plate_velocities(
                     if !is_cont_i && dens_i > 2860.0 && is_subducting {
                         let excess =
                             ((dens_i - config.young_ocean_density) / 240.0).clamp(0.15, 1.5);
-                        let age_factor =
-                            (age_i / config.oceanic_mature_age).clamp(0.1, 1.2).sqrt();
-                        driving_force += n_dir
-                            * (config.slab_pull_strength * excess * age_factor * edge_weight);
+                        let age_factor = (age_i / config.oceanic_mature_age).clamp(0.1, 1.2).sqrt();
+                        driving_force +=
+                            n_dir * (config.slab_pull_strength * excess * age_factor * edge_weight);
                     } else if is_cont_i {
                         let thick_factor =
                             (thick_i / config.cont_crust_thickness_km).clamp(0.8, 2.2);
@@ -152,8 +151,8 @@ pub fn update_plate_velocities(
 
     // 4. Интеграция угловой скорости — как в старом коде (без изменений)
     for (p_id, plate) in geology.plates.iter_mut().enumerate() {
-    // TODO: интеграция угловой скорости
-    let _ = (p_id, plate);
-}
+        // TODO: интеграция угловой скорости
+        let _ = (p_id, plate);
+    }
     let _ = cache;
 }

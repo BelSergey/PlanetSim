@@ -149,8 +149,8 @@ impl SaveLoadLogger {
         let msg = msg.into();
         if let Ok(mut guard) = self.inner.lock() {
             if let Some(last) = guard.entries.last_mut()
-    && last.duration_ms.is_none()
-{
+                && last.duration_ms.is_none()
+            {
                 if last.duration_ms.is_none() {
                     let ms = last.started_at.elapsed().as_millis();
                     last.duration_ms = Some(ms);
@@ -168,8 +168,8 @@ impl SaveLoadLogger {
     pub fn finish_ok(&self) {
         if let Ok(mut guard) = self.inner.lock() {
             if let Some(last) = guard.entries.last_mut()
-    && last.duration_ms.is_none()
-{
+                && last.duration_ms.is_none()
+            {
                 if last.duration_ms.is_none() {
                     let ms = last.started_at.elapsed().as_millis();
                     last.duration_ms = Some(ms);

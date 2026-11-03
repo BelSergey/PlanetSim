@@ -8,7 +8,7 @@ pub mod isostasy;
 pub mod lithology;
 pub mod ocean;
 
-pub use init::{generate_hotspots, generate_plates, generate_plumes, init_tectonics};
+pub use init::{generate_hotspots, generate_plates};
 pub use isostasy::step_elevation_diffusion;
 pub use lithology::finalize_tectonics;
 

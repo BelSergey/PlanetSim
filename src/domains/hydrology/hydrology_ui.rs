@@ -78,51 +78,50 @@ pub fn draw_hydrology_tab_system(
         .add(egui::Slider::new(&mut config.river_width_scale, 0.3..=5.0).text("Ширина русел"))
         .changed();
 
-ui.add(
-    egui::Slider::new(&mut config.river_groundwater_seepage, 0.0..=2.5)
-        .text("Подпитка почвы от рек и озёр"),
-);
+    ui.add(
+        egui::Slider::new(&mut config.river_groundwater_seepage, 0.0..=2.5)
+            .text("Подпитка почвы от рек и озёр"),
+    );
 
-ui.add_space(4.0);
-ui.separator();
-ui.label("Обратная связь с климатом:");
+    ui.add_space(4.0);
+    ui.separator();
+    ui.label("Обратная связь с климатом:");
 
-ui.checkbox(
-    &mut config.coupled_climate_feedback,
-    "Включить обратную связь (Альбедо и Испарение)",
-);
+    ui.checkbox(
+        &mut config.coupled_climate_feedback,
+        "Включить обратную связь (Альбедо и Испарение)",
+    );
 
-ui.checkbox(
-    &mut config.defer_initial_feedback,
-    "Отложить при первичной генерации",
-)
-.on_hover_text(
-    "Экономит ~1300 мс при первом показе планеты.\n\
+    ui.checkbox(
+        &mut config.defer_initial_feedback,
+        "Отложить при первичной генерации",
+    )
+    .on_hover_text(
+        "Экономит ~1300 мс при первом показе планеты.\n\
      Биомы строятся по усреднённому альбедо суши.\n\
      Полный feedback запускается кнопкой ниже.",
-);
+    );
 
-let feedback_enabled =
-    config.coupled_climate_feedback && !config.defer_initial_feedback;
+    let feedback_enabled = config.coupled_climate_feedback && !config.defer_initial_feedback;
 
-let feedback_btn = ui.add_sized(
-    [ui.available_width(), 34.0],
-    egui::Button::new("🌡 Применить обратную связь климата (~1.2 с)"),
-);
+    let feedback_btn = ui.add_sized(
+        [ui.available_width(), 34.0],
+        egui::Button::new("🌡 Применить обратную связь климата (~1.2 с)"),
+    );
 
-if feedback_btn
-    .on_hover_text(
-        "Пересчитает климат, используя текущие биомы, реки и озёра.\n\
+    if feedback_btn
+        .on_hover_text(
+            "Пересчитает климат, используя текущие биомы, реки и озёра.\n\
          Запускает PipelineStage::Hydrology.",
-    )
-    .clicked()
-{
-    gen_req.request(PipelineStage::Hydrology);
-}
+        )
+        .clicked()
+    {
+        gen_req.request(PipelineStage::Hydrology);
+    }
 
-if !feedback_enabled {
-    ui.weak("ℹ Сейчас feedback отложен — биомы построены по усреднённому альбедо.");
-}
+    if !feedback_enabled {
+        ui.weak("ℹ Сейчас feedback отложен — биомы построены по усреднённому альбедо.");
+    }
 
     ui.add_space(10.0);
     ui.separator();

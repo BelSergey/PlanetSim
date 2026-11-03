@@ -1,5 +1,5 @@
 // src/domains/civilization/civ_palettes.rs
-
+use rayon::prelude::*;
 use bevy::color::{Color, ColorToComponents};
 
 use super::{
@@ -14,8 +14,8 @@ use crate::domains::{
 /// Превращает произвольный entity_id в яркий, контрастный цвет на сфере
 #[inline]
 fn entity_id_to_rgb(entity_id: u32) -> [f32; 3] {
-let mut h = entity_id.wrapping_mul(0x45d9_f3b);
-h = ((h >> 16) ^ h).wrapping_mul(0x45d9_f3b);
+    let mut h = entity_id.wrapping_mul(0x45d9_f3b);
+    h = ((h >> 16) ^ h).wrapping_mul(0x45d9_f3b);
     h = (h >> 16) ^ h;
 
     let hue = (h & 0xFFFF) as f32 / 65535.0 * 360.0;
@@ -43,7 +43,7 @@ pub fn build_civ_layer_colors(
 
     geology
         .elevations
-        .iter()
+        .par_iter()
         .enumerate()
         .map(|(i, &elev)| {
             if elev <= 0.0 {
