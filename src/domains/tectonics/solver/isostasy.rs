@@ -1,6 +1,6 @@
 // src/domains/tectonics/solver/isostasy.rs
 
-use super::{smoothstep, TectonicsGeometryCache, TectonicsScratch};
+use super::{TectonicsGeometryCache, TectonicsScratch, smoothstep};
 use crate::{
     domains::tectonics::{tectonics_config::TectonicsConfig, tectonics_data::GeologyLayer},
     world::topology::WorldTopology,
@@ -35,9 +35,9 @@ pub fn update_isostasy_and_erosion(
     let rho_m = config.mantle_density.max(3000.0);
     let cont_buoyancy_ratio =
         ((rho_m - config.cont_crust_density) / (3300.0 - 2700.0)).clamp(0.4, 2.0);
-    let ocean_sink_ratio =
-        ((config.old_ocean_density - config.young_ocean_density) / (3130.0 - 2890.0))
-            .clamp(0.3, 2.2);
+    let ocean_sink_ratio = ((config.old_ocean_density - config.young_ocean_density)
+        / (3130.0 - 2890.0))
+        .clamp(0.3, 2.2);
 
     let eff_cont_base = config.cont_base_height * cont_buoyancy_ratio;
     let eff_ocean_base = config.ocean_base_height;

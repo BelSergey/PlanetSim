@@ -128,8 +128,8 @@ impl Default for TectonicsConfig {
             plate_base_height_variance: 0.035,
             plate_dir_iterations: 18,
 
-            simulation_steps: 55,
-            time_step: 0.018,
+            simulation_steps: 35,
+            time_step: 0.028,
             angular_vel_min: 0.45,
             angular_vel_max: 1.85,
 

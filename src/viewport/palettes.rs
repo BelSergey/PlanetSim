@@ -1,18 +1,17 @@
 // src/viewport/palettes.rs
 
-use bevy::prelude::*;
 use bevy::color::ColorToComponents;
+use bevy::prelude::*;
+use rayon::prelude::*;
 
-use crate::{
-    domains::{
-        climate::climate_data::ClimateLayer,
-        hydrology::{
-            hydrology_data::{Biome, HydrologyLayer},
-            hydrology_palettes::biome_satellite_rgb,
-        },
-        palettes::{rgb_u8, LegendEntry, MapLegend},
-        tectonics::tectonics_data::GeologyLayer,
+use crate::domains::{
+    climate::climate_data::ClimateLayer,
+    hydrology::{
+        hydrology_data::{Biome, HydrologyLayer},
+        hydrology_palettes::biome_satellite_rgb,
     },
+    palettes::{LegendEntry, MapLegend, rgb_u8},
+    tectonics::tectonics_data::GeologyLayer,
 };
 
 /// Композитная «спутниковая» палитра базового вида (SpaceView).
@@ -23,7 +22,7 @@ pub fn build_space_colors(
 ) -> Vec<[f32; 4]> {
     geology
         .elevations
-        .iter()
+        .par_iter()
         .enumerate()
         .map(|(i, &h)| {
             let albedo = climate.albedo[i];
@@ -64,16 +63,46 @@ pub fn space_view_legend() -> MapLegend {
     MapLegend {
         title: "Базовый вид (SpaceView)",
         entries: vec![
-            LegendEntry { rgb: rgb_u8(0.03, 0.12, 0.30), label: "Глубокий океан".into() },
-            LegendEntry { rgb: rgb_u8(0.06, 0.28, 0.53), label: "Мелководье / шельф".into() },
-            LegendEntry { rgb: rgb_u8(0.88, 0.94, 0.99), label: "Морской лёд".into() },
-            LegendEntry { rgb: rgb_u8(0.94, 0.97, 1.00), label: "Ледниковый щит".into() },
-            LegendEntry { rgb: rgb_u8(0.07, 0.30, 0.10), label: "Тропические леса".into() },
-            LegendEntry { rgb: rgb_u8(0.20, 0.42, 0.16), label: "Умеренные леса".into() },
-            LegendEntry { rgb: rgb_u8(0.52, 0.58, 0.26), label: "Степи / саванны".into() },
-            LegendEntry { rgb: rgb_u8(0.84, 0.71, 0.46), label: "Пустыни".into() },
-            LegendEntry { rgb: rgb_u8(0.45, 0.41, 0.38), label: "Голые скалы / тундра".into() },
-            LegendEntry { rgb: rgb_u8(0.94, 0.97, 1.00), label: "Сезонный снежный покров".into() },
+            LegendEntry {
+                rgb: rgb_u8(0.03, 0.12, 0.30),
+                label: "Глубокий океан".into(),
+            },
+            LegendEntry {
+                rgb: rgb_u8(0.06, 0.28, 0.53),
+                label: "Мелководье / шельф".into(),
+            },
+            LegendEntry {
+                rgb: rgb_u8(0.88, 0.94, 0.99),
+                label: "Морской лёд".into(),
+            },
+            LegendEntry {
+                rgb: rgb_u8(0.94, 0.97, 1.00),
+                label: "Ледниковый щит".into(),
+            },
+            LegendEntry {
+                rgb: rgb_u8(0.07, 0.30, 0.10),
+                label: "Тропические леса".into(),
+            },
+            LegendEntry {
+                rgb: rgb_u8(0.20, 0.42, 0.16),
+                label: "Умеренные леса".into(),
+            },
+            LegendEntry {
+                rgb: rgb_u8(0.52, 0.58, 0.26),
+                label: "Степи / саванны".into(),
+            },
+            LegendEntry {
+                rgb: rgb_u8(0.84, 0.71, 0.46),
+                label: "Пустыни".into(),
+            },
+            LegendEntry {
+                rgb: rgb_u8(0.45, 0.41, 0.38),
+                label: "Голые скалы / тундра".into(),
+            },
+            LegendEntry {
+                rgb: rgb_u8(0.94, 0.97, 1.00),
+                label: "Сезонный снежный покров".into(),
+            },
         ],
     }
 }

@@ -1,5 +1,5 @@
 // src/domains/civilization/civ_palettes.rs
-
+use rayon::prelude::*;
 use bevy::color::{Color, ColorToComponents};
 
 use super::{
@@ -43,7 +43,7 @@ pub fn build_civ_layer_colors(
 
     geology
         .elevations
-        .iter()
+        .par_iter()
         .enumerate()
         .map(|(i, &elev)| {
             if elev <= 0.0 {
@@ -113,7 +113,11 @@ pub fn build_civ_layer_colors(
 
 // ==== ЛЕГЕНДЫ КАРТЫ ДЛЯ 7 СЛОЕВ ИНСТИТУТОВ ====
 
-fn make_inst_legend(title: &'static str, entity_desc: &'static str, core_desc: &'static str) -> MapLegend {
+fn make_inst_legend(
+    title: &'static str,
+    entity_desc: &'static str,
+    core_desc: &'static str,
+) -> MapLegend {
     MapLegend {
         title,
         entries: vec![

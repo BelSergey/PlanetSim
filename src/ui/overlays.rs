@@ -21,14 +21,13 @@ use crate::{
         palettes::{LegendEntry, MapLegend},
         save::SaveLoadTask,
         tectonics::tectonics_palettes::{
-            crust_age_legend, elevation_legend, lithology_legend, plates_legend,
-            ruggedness_legend, tectonic_stress_legend,
+            crust_age_legend, elevation_legend, lithology_legend, plates_legend, ruggedness_legend,
+            tectonic_stress_legend,
         },
     },
     ui::shell::ShellLayout,
     viewport::{MapOverlay, palettes::space_view_legend},
 };
-
 
 /// Отрисовать строки «лога задач» (одинаковы для генерации и сейв/лоада).
 macro_rules! draw_task_entries {
@@ -317,33 +316,33 @@ pub fn map_legend_overlay(
 
 fn draw_legend_for(ui: &mut egui::Ui, overlay: &MapOverlay) {
     let legend: MapLegend = match overlay {
-        MapOverlay::SpaceView       => space_view_legend(),
-        MapOverlay::Elevation       => elevation_legend(),
-        MapOverlay::TectonicPlates  => plates_legend(),
-        MapOverlay::Continentality  => continentality_legend(),
-        MapOverlay::Lithology       => lithology_legend(),
-        MapOverlay::Ruggedness      => ruggedness_legend(),
-        MapOverlay::CrustAge        => crust_age_legend(),
-        MapOverlay::TectonicStress  => tectonic_stress_legend(),
-        MapOverlay::Temperature     => temperature_legend(),
-        MapOverlay::Humidity        => humidity_legend(),
-        MapOverlay::Precipitation   => precipitation_legend(),
-        MapOverlay::Albedo          => albedo_legend(),
-        MapOverlay::Pressure        => pressure_legend(),
-        MapOverlay::Winds           => wind_legend(),
-        MapOverlay::Soils           => soils_legend(),
-        MapOverlay::SoilMoisture    => soil_moisture_legend(),
-        MapOverlay::Biomes          => biomes_legend(),
-        MapOverlay::FoodPotential   => food_potential_legend(),
-        MapOverlay::Minerals        => minerals_legend(),
-        MapOverlay::BioResources    => bio_resources_legend(),
-        MapOverlay::CivSpecies      => civ_species_legend(),
-        MapOverlay::CivKinship      => civ_kinship_legend(),
-        MapOverlay::CivCulture      => civ_culture_legend(),
-        MapOverlay::CivReligion     => civ_religion_legend(),
-        MapOverlay::CivEconomy      => civ_economy_legend(),
-        MapOverlay::CivPolity       => civ_polity_legend(),
-        MapOverlay::CivKnowledge    => civ_knowledge_legend(),
+        MapOverlay::SpaceView => space_view_legend(),
+        MapOverlay::Elevation => elevation_legend(),
+        MapOverlay::TectonicPlates => plates_legend(),
+        MapOverlay::Continentality => continentality_legend(),
+        MapOverlay::Lithology => lithology_legend(),
+        MapOverlay::Ruggedness => ruggedness_legend(),
+        MapOverlay::CrustAge => crust_age_legend(),
+        MapOverlay::TectonicStress => tectonic_stress_legend(),
+        MapOverlay::Temperature => temperature_legend(),
+        MapOverlay::Humidity => humidity_legend(),
+        MapOverlay::Precipitation => precipitation_legend(),
+        MapOverlay::Albedo => albedo_legend(),
+        MapOverlay::Pressure => pressure_legend(),
+        MapOverlay::Winds => wind_legend(),
+        MapOverlay::Soils => soils_legend(),
+        MapOverlay::SoilMoisture => soil_moisture_legend(),
+        MapOverlay::Biomes => biomes_legend(),
+        MapOverlay::FoodPotential => food_potential_legend(),
+        MapOverlay::Minerals => minerals_legend(),
+        MapOverlay::BioResources => bio_resources_legend(),
+        MapOverlay::CivSpecies => civ_species_legend(),
+        MapOverlay::CivKinship => civ_kinship_legend(),
+        MapOverlay::CivCulture => civ_culture_legend(),
+        MapOverlay::CivReligion => civ_religion_legend(),
+        MapOverlay::CivEconomy => civ_economy_legend(),
+        MapOverlay::CivPolity => civ_polity_legend(),
+        MapOverlay::CivKnowledge => civ_knowledge_legend(),
     };
     draw_legend(ui, &legend);
 }
@@ -361,8 +360,7 @@ fn draw_legend(ui: &mut egui::Ui, legend: &MapLegend) {
 
 fn draw_legend_entry(ui: &mut egui::Ui, entry: &LegendEntry) {
     ui.horizontal(|ui| {
-        let (rect, _) =
-            ui.allocate_exact_size(egui::vec2(18.0, 14.0), egui::Sense::hover());
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(18.0, 14.0), egui::Sense::hover());
         let color = egui::Color32::from_rgb(entry.rgb[0], entry.rgb[1], entry.rgb[2]);
         // egui 0.31+: CornerRadius. Для более старых версий: egui::Rounding::same(2.0).
         ui.painter()

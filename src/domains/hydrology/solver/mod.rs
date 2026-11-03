@@ -43,23 +43,18 @@ impl SurfaceNoise {
         let mut moisture_jitter = Vec::with_capacity(num_cells);
         let mut meander_field = Vec::with_capacity(num_cells);
 
-        for cell in &topology.cells {
+        for cell in topology.cells.iter() {
             let p = cell.center.as_dvec3();
 
-            let t_macro =
-                fbm.get([p.x * 11.0 + 17.3, p.y * 11.0 - 29.1, p.z * 11.0 + 43.7]) as f32;
-            let t_micro =
-                fbm.get([p.x * 28.0 - 11.4, p.y * 28.0 + 51.2, p.z * 28.0 - 19.8]) as f32;
+            let t_macro = fbm.get([p.x * 11.0 + 17.3, p.y * 11.0 - 29.1, p.z * 11.0 + 43.7]) as f32;
+            let t_micro = fbm.get([p.x * 28.0 - 11.4, p.y * 28.0 + 51.2, p.z * 28.0 - 19.8]) as f32;
             temp_jitter.push(t_macro * 0.70 + t_micro * 0.30);
 
-            let m_macro =
-                fbm.get([p.x * 12.0 - 63.1, p.y * 12.0 + 14.8, p.z * 12.0 - 37.5]) as f32;
-            let m_micro =
-                fbm.get([p.x * 29.0 + 41.2, p.y * 29.0 - 23.9, p.z * 29.0 + 68.4]) as f32;
+            let m_macro = fbm.get([p.x * 12.0 - 63.1, p.y * 12.0 + 14.8, p.z * 12.0 - 37.5]) as f32;
+            let m_micro = fbm.get([p.x * 29.0 + 41.2, p.y * 29.0 - 23.9, p.z * 29.0 + 68.4]) as f32;
             moisture_jitter.push(m_macro * 0.70 + m_micro * 0.30);
 
-            let r_noise =
-                fbm.get([p.x * 22.0 + 83.5, p.y * 22.0 + 19.2, p.z * 22.0 - 54.6]) as f32;
+            let r_noise = fbm.get([p.x * 22.0 + 83.5, p.y * 22.0 + 19.2, p.z * 22.0 - 54.6]) as f32;
             meander_field.push(r_noise);
         }
 

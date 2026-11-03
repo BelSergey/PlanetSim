@@ -1,8 +1,9 @@
 // src/domains/tectonics/solver/boundaries.rs:
 
 use super::{
+    TectonicsGeometryCache, TectonicsScratch,
     init::{craton_continental_factor, find_closest_plates_and_boundary_dists},
-    smoothstep, TectonicsGeometryCache, TectonicsScratch,
+    smoothstep,
 };
 use crate::{
     domains::tectonics::{
@@ -149,8 +150,10 @@ pub fn project_plates_and_boundaries(
                     let p2 = &plates[p2_idx];
                     let p3 = &plates[p3_idx];
 
-                    let normal2 = spherical_voronoi_normal(warped_dir, p1.center_dir, p2.center_dir);
-                    let normal3 = spherical_voronoi_normal(warped_dir, p1.center_dir, p3.center_dir);
+                    let normal2 =
+                        spherical_voronoi_normal(warped_dir, p1.center_dir, p2.center_dir);
+                    let normal3 =
+                        spherical_voronoi_normal(warped_dir, p1.center_dir, p3.center_dir);
 
                     let eps = 0.0004_f32;
                     let w2 = 1.0 / (bd2 * bd2 + eps);
@@ -249,9 +252,9 @@ pub fn project_plates_and_boundaries(
 
                     let boundary_elev_delta = dh2 * weight2 + dh3 * weight3;
                     let target_orogeny = (orog2 * weight2 + orog3 * weight3).clamp(0.0, 1.0);
-                    let local_stress =
-                        (conv2 * smoothstep(f2) * weight2 + conv3 * smoothstep(f3) * weight3)
-                            .clamp(-1.0, 1.0);
+                    let local_stress = (conv2 * smoothstep(f2) * weight2
+                        + conv3 * smoothstep(f3) * weight3)
+                        .clamp(-1.0, 1.0);
 
                     if c_eff < 0.32 && ((is_ridge2 && bd2 < 0.055) || (is_ridge3 && bd3 < 0.055)) {
                         *ridge_flag_out = true;
@@ -273,7 +276,8 @@ pub fn project_plates_and_boundaries(
                     // Утолщение коры происходит только от положительного орогенеза/сжатия,
                     // а утончение (`rift_thinning_rate`) — только в зонах растяжения (`local_stress < 0`), но НЕ в желобах субдукции!
                     let base_thick = config.ocean_crust_thickness_km
-                        + c_eff * (config.cont_crust_thickness_km - config.ocean_crust_thickness_km);
+                        + c_eff
+                            * (config.cont_crust_thickness_km - config.ocean_crust_thickness_km);
                     let compressional_thickening = boundary_elev_delta.max(0.0)
                         * (config.convergence_thickening_rate * 1.45)
                         + aged_orog * (config.convergence_thickening_rate * 0.22);
@@ -303,50 +307,23 @@ pub fn project_plates_and_boundaries(
             );
     }
 
-    update_crust_age_and_density(topology, cache, geology, &is_spreading_ridge, config);
+    if geology.sim_step.is_multiple_of(4) {
+        update_crust_age_and_density_fast(topology, cache, geology, &is_spreading_ridge, config);
+    } else {
+        update_crust_age_fast(geology, &is_spreading_ridge, dt, config);
+    }
 }
 
-fn update_crust_age_and_density(
-    topology: &WorldTopology,
-    cache: &TectonicsGeometryCache,
+pub fn update_crust_age_fast(
     geology: &mut GeologyLayer,
     is_spreading_ridge: &[bool],
+    dt: f32,
     config: &TectonicsConfig,
 ) {
-    let num_cells = topology.cells.len();
-    let mut dist_steps = vec![u32::MAX; num_cells];
-    let mut queue = VecDeque::new();
-
-    for (i, &is_ridge) in is_spreading_ridge.iter().enumerate() {
-        if is_ridge {
-            dist_steps[i] = 0;
-            queue.push_back(i);
-        }
-    }
-
-    while let Some(curr) = queue.pop_front() {
-        let d = dist_steps[curr];
-        let p_curr = geology.plate_ids[curr];
-        for &nbr in &topology.cells[curr].neighbors {
-            let p_nbr = geology.plate_ids[nbr];
-            // Запрещаем волне молодого возраста перешагивать через чужие границы плит (кроме самой оси СОХ) и зоны субдукции
-            let same_or_ridge =
-                (p_curr == p_nbr) || is_spreading_ridge[curr] || is_spreading_ridge[nbr];
-            let not_subduction_trench = geology.tectonic_stress[nbr] <= 0.08;
-
-            if same_or_ridge
-                && not_subduction_trench
-                && geology.subcell_shift[nbr][1] < 0.65
-                && dist_steps[nbr] > d + 1
-            {
-                dist_steps[nbr] = d + 1;
-                queue.push_back(nbr);
-            }
-        }
-    }
-
-    let step_rad = cache.avg_cell_rad;
-    let mature_rad = 0.75_f32;
+    let mature = config.oceanic_mature_age.max(1e-4);
+    let young = config.young_ocean_density;
+    let old = config.old_ocean_density;
+    let cont = config.cont_crust_density;
 
     let age = &mut geology.crust_age;
     let density = &mut geology.crust_density;
@@ -355,27 +332,87 @@ fn update_crust_age_and_density(
     age.par_iter_mut()
         .zip(density.par_iter_mut())
         .zip(shifts.par_iter())
+        .zip(is_spreading_ridge.par_iter())
+        .for_each(|(((age_out, dens_out), shift), &is_ridge)| {
+            // Инкремент возраста: в зоне спрединга сбрасывается, иначе растёт
+            if is_ridge {
+                *age_out = 0.0;
+            } else {
+                *age_out = (*age_out + dt * 0.4).min(mature);
+            }
+
+            let c_eff = shift[1];
+            let cont_blend = smoothstep((c_eff - 0.32) / 0.24);
+            let age_norm = (*age_out / mature).clamp(0.0, 1.0).sqrt();
+            let ocean_dens = young + age_norm * (old - young);
+            *dens_out = ocean_dens * (1.0 - cont_blend) + cont * cont_blend;
+        });
+}
+
+/// Точный (раз в 4 шага) пересчёт возраста/плотности коры через BFS
+/// от активных срединно-океанических хребтов. Использует уже импортированный
+/// `VecDeque`, `smoothstep` и `cache.avg_cell_rad`.
+pub fn update_crust_age_and_density_fast(
+    topology: &WorldTopology,
+    cache: &TectonicsGeometryCache,
+    geology: &mut GeologyLayer,
+    is_spreading_ridge: &[bool],
+    config: &TectonicsConfig,
+) {
+    let num_cells = topology.cells.len();
+    if num_cells == 0 || is_spreading_ridge.len() != num_cells {
+        return;
+    }
+
+    // 1. Мульти-источниковый BFS от всех клеток спрединга
+    let mut dist = vec![u32::MAX; num_cells];
+    let mut queue = VecDeque::with_capacity(num_cells / 4);
+    for i in 0..num_cells {
+        if is_spreading_ridge[i] {
+            dist[i] = 0;
+            queue.push_back(i);
+        }
+    }
+    while let Some(u) = queue.pop_front() {
+        let next_d = dist[u].saturating_add(1);
+        for &v in &topology.cells[u].neighbors {
+            if dist[v] > next_d {
+                dist[v] = next_d;
+                queue.push_back(v);
+            }
+        }
+    }
+
+    // 2. Калибровка: 0.40 рад (~25° дуги) от хребта → зрелая кора.
+    //    При subdiv 7 (avg_cell_rad ≈ 0.00876) это ≈ 46 клеток от хребта.
+    let mature = config.oceanic_mature_age.max(1e-4);
+    let age_per_rad = mature / 0.40_f32;
+    let young = config.young_ocean_density;
+    let old = config.old_ocean_density;
+    let cont = config.cont_crust_density;
+
+    geology
+        .crust_age
+        .par_iter_mut()
+        .zip(geology.crust_density.par_iter_mut())
+        .zip(geology.subcell_shift.par_iter())
         .enumerate()
         .for_each(|(i, ((age_out, dens_out), shift))| {
-            let c_eff = shift[1];
-            let ocean_age = if dist_steps[i] != u32::MAX {
-                let rad_from_ridge = (dist_steps[i] as f32) * step_rad;
-                ((rad_from_ridge / mature_rad) * config.oceanic_mature_age)
-                    .clamp(0.0, config.oceanic_mature_age * 1.15)
+            let new_age = if dist[i] == u32::MAX {
+                // Изолированная клетка (нет ни одного хребта в связной сетке — фолбэк)
+                (*age_out + 0.045).min(mature)
             } else {
-                config.oceanic_mature_age * 0.90
+                let dist_rad = dist[i] as f32 * cache.avg_cell_rad;
+                (dist_rad * age_per_rad).min(mature)
             };
+            *age_out = new_age;
 
-            let cont_age = config.oceanic_mature_age * (1.10 + c_eff * 1.50);
+            // Смешивание океанической и континентальной плотности по c_eff
+            let c_eff = shift[1];
             let cont_blend = smoothstep((c_eff - 0.32) / 0.24);
-            *age_out = ocean_age * (1.0 - cont_blend) + cont_age * cont_blend;
-
-            let cooling = (ocean_age / config.oceanic_mature_age.max(0.1))
-                .clamp(0.0, 1.0)
-                .sqrt();
-            let ocean_dens = config.young_ocean_density
-                + cooling * (config.old_ocean_density - config.young_ocean_density);
-            *dens_out = ocean_dens * (1.0 - cont_blend) + config.cont_crust_density * cont_blend;
+            let age_norm = (new_age / mature).clamp(0.0, 1.0).sqrt();
+            let ocean_dens = young + age_norm * (old - young);
+            *dens_out = ocean_dens * (1.0 - cont_blend) + cont * cont_blend;
         });
 }
 

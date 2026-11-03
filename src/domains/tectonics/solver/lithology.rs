@@ -1,8 +1,8 @@
 // src/domains/tectonics/solver/lithology.rs
 
 use super::{
-    boundaries::fast_domain_warp, isostasy::step_elevation_diffusion,
-    ocean::compute_oceans_and_continentality, smoothstep, TectonicsGeometryCache,
+    TectonicsGeometryCache, boundaries::fast_domain_warp, isostasy::step_elevation_diffusion,
+    ocean::compute_oceans_and_continentality, smoothstep,
 };
 use crate::{
     domains::{
@@ -45,11 +45,8 @@ pub fn finalize_tectonics(
             .for_each(|(i, (elev_out, mask_out))| {
                 let dir = topology.cells[i].center;
                 // Искажённое направление границ плит (совпадает с boundaries.rs и classify_physical_lithology)
-                let boundary_warped = fast_domain_warp(
-                    dir,
-                    config.warp_scale as f32,
-                    config.warp_strength,
-                );
+                let boundary_warped =
+                    fast_domain_warp(dir, config.warp_scale as f32, config.warp_strength);
                 let bw_dvec = boundary_warped.as_dvec3();
 
                 let p = dir.as_dvec3() * config.warp_scale;
@@ -100,11 +97,8 @@ pub fn finalize_tectonics(
 
                 // Щитовые вулканические острова и стратовулканы с учётом `volcano_profile_pow` и `volcano_noise_base`
                 let v_scale = config.volcano_noise_scale;
-                let raw_v1 = noise.get([
-                    w_dvec.x * v_scale,
-                    w_dvec.y * v_scale,
-                    w_dvec.z * v_scale,
-                ]) as f32;
+                let raw_v1 =
+                    noise.get([w_dvec.x * v_scale, w_dvec.y * v_scale, w_dvec.z * v_scale]) as f32;
                 let raw_v2 = noise.get([
                     w_dvec.x * (v_scale * 1.9) + 17.3,
                     w_dvec.y * (v_scale * 1.9) - 31.1,
@@ -122,8 +116,7 @@ pub fn finalize_tectonics(
 
                 for v in volcanoes {
                     let dist = v_warp.dot(v.center).clamp(-1.0, 1.0).acos();
-                    let eff_radius =
-                        (v.radius * (0.80 + 0.40 * raw_v1 + 0.22 * raw_v2)).max(0.018);
+                    let eff_radius = (v.radius * (0.80 + 0.40 * raw_v1 + 0.22 * raw_v2)).max(0.018);
 
                     if dist < eff_radius {
                         let r_norm = (dist / eff_radius).clamp(0.0, 1.0);
@@ -156,11 +149,8 @@ pub fn finalize_tectonics(
 
                 // Оба масштаба детального шума берутся в согласованном искаженном пространстве `w_dvec`!
                 let d_scale = config.detail_noise_scale;
-                let detail_macro = noise.get([
-                    w_dvec.x * d_scale,
-                    w_dvec.y * d_scale,
-                    w_dvec.z * d_scale,
-                ]) as f32;
+                let detail_macro =
+                    noise.get([w_dvec.x * d_scale, w_dvec.y * d_scale, w_dvec.z * d_scale]) as f32;
                 let detail_micro = noise.get([
                     w_dvec.x * (d_scale * 2.7) + 41.2,
                     w_dvec.y * (d_scale * 2.7) - 19.8,
@@ -238,8 +228,7 @@ fn classify_physical_lithology(
             // Используем те же искаженные координаты `warped_dir`, что и для границ/орогенеза
             let warped_dir = fast_domain_warp(topology.cells[i].center, warp_scale, warp_strength);
             let d = warped_dir.as_dvec3();
-            let l_noise =
-                noise.get([d.x * 6.5 + 31.7, d.y * 6.5 - 19.3, d.z * 6.5 + 47.1]) as f32;
+            let l_noise = noise.get([d.x * 6.5 + 31.7, d.y * 6.5 - 19.3, d.z * 6.5 + 47.1]) as f32;
 
             if volcano_mask[i] {
                 *lith_out = if dens >= 2830.0 {
@@ -257,8 +246,7 @@ fn classify_physical_lithology(
             let mut max_slope = 0.0_f32;
             for e in start..end {
                 let nbr = cache.edge_neighbors[e];
-                let grad =
-                    ((elev - elevations[nbr]).abs() / cache.edge_dists_rad[e]) * ref_rad;
+                let grad = ((elev - elevations[nbr]).abs() / cache.edge_dists_rad[e]) * ref_rad;
                 if grad > max_slope {
                     max_slope = grad;
                 }

@@ -33,7 +33,7 @@ pub fn hotkey_controls(
             MapOverlay::Temperature => MapOverlay::Humidity,
             MapOverlay::Humidity => MapOverlay::Precipitation,
             MapOverlay::Precipitation => MapOverlay::Albedo,
-            MapOverlay::Albedo => MapOverlay::Continentality,
+            MapOverlay::Albedo => MapOverlay::Pressure,
             MapOverlay::Pressure => MapOverlay::Winds,
             MapOverlay::Winds => MapOverlay::Soils,
             MapOverlay::Soils => MapOverlay::SoilMoisture,

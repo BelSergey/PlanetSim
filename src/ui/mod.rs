@@ -7,14 +7,19 @@ mod shell;
 use bevy::prelude::*;
 use bevy_egui::{EguiPlugin, EguiPrimaryContextPass};
 
-use crate::{domains::tectonics::GeologyLayer, viewport::Globe, world::states::AppState};
+use crate::{
+    astronomy::Sun,
+    domains::tectonics::GeologyLayer,
+    viewport::{Globe, SunVisualConfig, ViewMode},
+    world::states::AppState,
+};
 
 use main_menu::main_menu_ui;
 use overlays::{
     LegendState, generation_progress_overlay, map_legend_overlay, save_load_progress_overlay,
 };
-use shell::render_ui_shell;
 pub use shell::ShellLayout;
+use shell::render_ui_shell;
 
 #[derive(Resource, Default, PartialEq, Eq, Clone, Copy, Debug)]
 pub enum ActiveTab {
@@ -36,7 +41,7 @@ impl Plugin for UiPlugin {
 
         app.init_resource::<ActiveTab>()
             .init_resource::<LegendState>()
-            .init_resource::<ShellLayout>() 
+            .init_resource::<ShellLayout>()
             .add_systems(
                 EguiPrimaryContextPass,
                 (
@@ -55,18 +60,32 @@ impl Plugin for UiPlugin {
 fn manage_scene_visibility(
     state: Res<State<AppState>>,
     geology: Res<GeologyLayer>,
-    mut q_globe: Query<&mut Visibility, With<Globe>>,
+    sun_config: Res<SunVisualConfig>,
+    view_mode: Res<ViewMode>,
+    mut globe_query: Query<&mut Visibility, (With<Globe>, Without<Sun>)>,
+    mut sun_query: Query<&mut Visibility, (With<Sun>, Without<Globe>)>,
 ) {
-    let should_show = *state.get() == AppState::InGame && !geology.elevations.is_empty();
-    let target_vis = if should_show {
+    let planet_ready = *state.get() == AppState::InGame && !geology.elevations.is_empty();
+    let globe_visibility = if planet_ready {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
+    };
+    let sun_visibility = if planet_ready && sun_config.visible && *view_mode == ViewMode::StarSystem
+    {
         Visibility::Inherited
     } else {
         Visibility::Hidden
     };
 
-    for mut vis in q_globe.iter_mut() {
-        if *vis != target_vis {
-            *vis = target_vis;
+    for mut visibility in &mut globe_query {
+        if *visibility != globe_visibility {
+            *visibility = globe_visibility;
+        }
+    }
+    for mut visibility in &mut sun_query {
+        if *visibility != sun_visibility {
+            *visibility = sun_visibility;
         }
     }
 }

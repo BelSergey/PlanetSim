@@ -21,139 +21,163 @@ pub(super) fn compute_biomes(
     config: &HydrologyConfig,
     noise: &SurfaceNoise,
 ) {
+    use rayon::prelude::*;
+
     let num_cells = topology.cells.len();
+    let mut biomes = std::mem::take(&mut hydrology.biomes);
+    biomes.resize(num_cells, Biome::DeepOcean);
 
-    for i in 0..num_cells {
-        let elev = geology.elevations[i];
+    let is_ocean = &geology.is_ocean;
+    let elevations = &geology.elevations;
+    let t_spring = &climate.spring.temperatures;
+    let t_summer = &climate.summer.temperatures;
+    let t_winter = &climate.winter.temperatures;
+    let p_spring = &climate.spring.precipitation;
+    let p_summer = &climate.summer.precipitation;
+    let p_winter = &climate.winter.precipitation;
+    let temp_jitter = &noise.temp_jitter;
+    let moisture_jitter = &noise.moisture_jitter;
 
-        let t_spring = climate.spring.temperatures[i];
-        let t_summer = climate.summer.temperatures[i];
-        let t_winter = climate.winter.temperatures[i];
+    let lake_mask = &hydrology.lake_mask;
+    let is_salt_lake = &hydrology.is_salt_lake;
+    let soils = &hydrology.soils;
+    let soil_texture = &hydrology.soil_texture;
+    let flow_accumulation = &hydrology.flow_accumulation;
+    let soil_moisture = &hydrology.soil_moisture;
 
-        let mean_temp = (2.0 * t_spring + t_summer + t_winter) * 0.25;
-        let warm_temp = t_summer.max(t_winter).max(t_spring);
-        let cold_temp = t_summer.min(t_winter).min(t_spring);
+    let mountain_slope_threshold = config.mountain_slope_threshold;
+    let wetland_max_slope = config.wetland_max_slope;
+    let riparian_river_multiplier = config.riparian_river_multiplier;
+    let river_threshold = config.river_threshold;
+    let aridity_evap_scale = config.aridity_evap_scale;
 
-        let t_jit = noise.temp_jitter[i] * 1.5;
-        let m_jit = noise.moisture_jitter[i];
-        let ice_jitter = noise.temp_jitter[i] * 0.8;
+    let is_ocean_cell = |i: usize| -> bool {
+        is_ocean
+            .get(i)
+            .copied()
+            .unwrap_or_else(|| elevations.get(i).copied().unwrap_or(0.0) <= 0.0)
+    };
 
-        let eff_mean_temp = mean_temp + t_jit;
-        let eff_warm_temp = warm_temp + t_jit * 0.85;
-        let eff_cold_temp = cold_temp + t_jit * 0.85;
+    biomes
+        .par_iter_mut()
+        .enumerate()
+        .for_each(|(i, biome_out)| {
+            let elev = elevations[i];
+            let (t_spr, t_sum, t_win) = (t_spring[i], t_summer[i], t_winter[i]);
 
-        // 1. Океанические биомы (строго по `geology.is_ocean_cell(i)`)
-        if geology.is_ocean_cell(i) {
-            hydrology.biomes[i] =
-                if mean_temp + ice_jitter < -4.5 || warm_temp + ice_jitter < -1.0 {
+            let mean_temp = (2.0 * t_spr + t_sum + t_win) * 0.25;
+            let warm_temp = t_sum.max(t_win).max(t_spr);
+            let cold_temp = t_sum.min(t_win).min(t_spr);
+
+            let t_jit = temp_jitter[i] * 1.5;
+            let m_jit = moisture_jitter[i];
+            let ice_jit = temp_jitter[i] * 0.8;
+
+            let eff_mean_temp = mean_temp + t_jit;
+            let eff_warm_temp = warm_temp + t_jit * 0.85;
+            let eff_cold_temp = cold_temp + t_jit * 0.85;
+
+            if is_ocean_cell(i) {
+                *biome_out = if mean_temp + ice_jit < -4.5 || warm_temp + ice_jit < -1.0 {
                     Biome::SeaIce
                 } else if elev > -0.09 {
                     Biome::ShallowOcean
                 } else {
                     Biome::DeepOcean
                 };
-            continue;
-        }
+                return;
+            }
 
-        // 2. Озёрные биомы (проточные пресные, бессточные солёные и замёрзшие)
-        if hydrology.is_lake_cell(i) {
-            let is_salt = hydrology.is_salt_lake[i];
-            let freeze_thresh = if is_salt { -4.0 } else { -2.0 };
-            hydrology.biomes[i] =
-                if mean_temp + ice_jitter < freeze_thresh || warm_temp + ice_jitter < 0.0 {
+            if lake_mask[i] {
+                let is_salt = is_salt_lake[i];
+                let freeze_thresh = if is_salt { -4.0 } else { -2.0 };
+                *biome_out = if mean_temp + ice_jit < freeze_thresh || warm_temp + ice_jit < 0.0 {
                     Biome::LakeIce
                 } else if is_salt {
                     Biome::SaltLake
                 } else {
                     Biome::FreshwaterLake
                 };
-            continue;
-        }
-
-        // 3. Наземные биомы (включая сухие низменности с elev <= 0.0)
-        let p_spring = climate.spring.precipitation[i];
-        let p_summer = climate.summer.precipitation[i];
-        let p_winter = climate.winter.precipitation[i];
-        let annual_precip = (2.0 * p_spring + p_summer + p_winter) * 0.25;
-
-        let (warm_precip, cold_precip) = if t_summer >= t_winter {
-            (p_summer, p_winter)
-        } else {
-            (p_winter, p_summer)
-        };
-
-        let neighbors = &topology.cells[i].neighbors;
-        let mut max_slope = 0.0_f32;
-        for &n_id in neighbors {
-            let diff = (elev - geology.elevations[n_id]).abs();
-            if diff > max_slope {
-                max_slope = diff;
+                return;
             }
-        }
 
-        let soil = hydrology.soils[i];
-        let [sand, _silt, clay] = hydrology.soil_texture[i];
-        let flow = hydrology.flow_accumulation[i];
-
-        if eff_warm_temp < 0.0 || (eff_mean_temp < -9.0 && eff_warm_temp < 3.5) {
-            hydrology.biomes[i] = Biome::IceSheet;
-            continue;
-        }
-
-        if soil == SoilType::Leptosol
-            && (elev > 0.22 + m_jit * 0.02 || max_slope > config.mountain_slope_threshold * 1.15)
-        {
-            hydrology.biomes[i] = Biome::AlpineBare;
-            continue;
-        }
-
-        if eff_warm_temp < 8.5 || soil == SoilType::Gelisol {
-            hydrology.biomes[i] = if max_slope > config.mountain_slope_threshold {
-                Biome::AlpineBare
+            let annual_precip = (2.0 * p_spring[i] + p_summer[i] + p_winter[i]) * 0.25;
+            let (warm_precip, cold_precip) = if t_sum >= t_win {
+                (p_summer[i], p_winter[i])
             } else {
-                Biome::Tundra
+                (p_winter[i], p_summer[i])
             };
-            continue;
-        }
 
-        let sm = hydrology.soil_moisture[i];
-        let base_moisture_idx = (sm / (1.0 - sm * 0.68).max(0.15)).clamp(0.0, 2.5);
-        let moisture_idx = (base_moisture_idx * (1.0 + m_jit * 0.12)).clamp(0.0, 2.5);
+            let neighbors = &topology.cells[i].neighbors;
+            let mut max_slope = 0.0_f32;
+            for &n_id in neighbors {
+                let diff = (elev - elevations[n_id]).abs();
+                if diff > max_slope {
+                    max_slope = diff;
+                }
+            }
 
-        let pet = ((mean_temp + 10.0).max(2.0) * 0.013 * config.aridity_evap_scale).max(0.025);
-        let rain_only_sm = annual_precip / (annual_precip + pet * 0.7);
-        let river_moisture_surplus = (sm - rain_only_sm).max(0.0);
+            let soil = soils[i];
+            let [sand, _silt, clay] = soil_texture[i];
+            let flow = flow_accumulation[i];
 
-        let is_major_river = flow >= config.river_threshold * config.riparian_river_multiplier;
+            if eff_warm_temp < 0.0 || (eff_mean_temp < -9.0 && eff_warm_temp < 3.5) {
+                *biome_out = Biome::IceSheet;
+                return;
+            }
+            if soil == SoilType::Leptosol
+                && (elev > 0.22 + m_jit * 0.02 || max_slope > mountain_slope_threshold * 1.15)
+            {
+                *biome_out = Biome::AlpineBare;
+                return;
+            }
+            if eff_warm_temp < 8.5 || soil == SoilType::Gelisol {
+                *biome_out = if max_slope > mountain_slope_threshold {
+                    Biome::AlpineBare
+                } else {
+                    Biome::Tundra
+                };
+                return;
+            }
 
-        if max_slope < config.wetland_max_slope
-            && elev < 0.12
-            && (soil == SoilType::Gleysol || clay > 0.36)
-            && (sm > 0.74 - m_jit * 0.04 || (is_major_river && sm > 0.58))
-        {
-            hydrology.biomes[i] = Biome::Wetland;
-            continue;
-        }
+            let sm = soil_moisture[i];
+            let base_moisture_idx = (sm / (1.0 - sm * 0.68).max(0.15)).clamp(0.0, 2.5);
+            let moisture_idx = (base_moisture_idx * (1.0 + m_jit * 0.12)).clamp(0.0, 2.5);
 
-        if eff_mean_temp > 5.0
-            && rain_only_sm < 0.28
-            && (river_moisture_surplus > 0.16 || (is_major_river && sm > 0.36))
-        {
-            hydrology.biomes[i] = Biome::RiparianOasis;
-            continue;
-        }
+            let pet = ((mean_temp + 10.0).max(2.0) * 0.013 * aridity_evap_scale).max(0.025);
+            let rain_only_sm = annual_precip / (annual_precip + pet * 0.7);
+            let river_moisture_surplus = (sm - rain_only_sm).max(0.0);
+            let is_major_river = flow >= river_threshold * riparian_river_multiplier;
 
-        hydrology.biomes[i] = classify_whittaker_biome(
-            eff_mean_temp,
-            eff_warm_temp,
-            eff_cold_temp,
-            moisture_idx,
-            warm_precip,
-            cold_precip,
-            sand,
-            soil,
-        );
-    }
+            if max_slope < wetland_max_slope
+                && elev < 0.12
+                && (soil == SoilType::Gleysol || clay > 0.36)
+                && (sm > 0.74 - m_jit * 0.04 || (is_major_river && sm > 0.58))
+            {
+                *biome_out = Biome::Wetland;
+                return;
+            }
+            if eff_mean_temp > 5.0
+                && rain_only_sm < 0.28
+                && (river_moisture_surplus > 0.16 || (is_major_river && sm > 0.36))
+            {
+                *biome_out = Biome::RiparianOasis;
+                return;
+            }
+
+            *biome_out = classify_whittaker_biome(
+                eff_mean_temp,
+                eff_warm_temp,
+                eff_cold_temp,
+                moisture_idx,
+                warm_precip,
+                cold_precip,
+                sand,
+                soil,
+            );
+        });
+
+    hydrology.biomes = biomes;
 }
 
 #[allow(clippy::too_many_arguments)]

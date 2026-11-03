@@ -1,9 +1,9 @@
 // src/domains/mod.rs
 
+pub mod civilization;
 pub mod climate;
 pub mod hydrology;
 pub mod tectonics;
-pub mod civilization;
 
 pub mod generator;
 pub mod palettes;

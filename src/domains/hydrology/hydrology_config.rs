@@ -36,6 +36,12 @@ pub struct HydrologyConfig {
     /// Включить двухпроходную обратную связь (Биомы, Озёра и Реки меняют Альбедо, Влажность воздуха и Осадки)
     pub coupled_climate_feedback: bool,
 
+    /// При первичной генерации планеты пропускать второй проход обратной связи
+    /// (климат → биомы → альбедо/влажность → климат).
+    /// Экономит ~1300 мс, биомы на первом показе строятся по усреднённому
+    /// альбедо суши. Полный feedback запускается вручную кнопкой в Hydrology UI.
+    pub defer_initial_feedback: bool,
+
     // --- ПАРАМЕТРЫ БИОМОВ ---
     /// Сила влияния текстуры и влагоемкости почвы (песок/глина) на сдвиг биомов Уиттекера
     pub soil_biome_influence: f32,
@@ -68,6 +74,7 @@ impl Default for HydrologyConfig {
 
             river_groundwater_seepage: 1.0,
             coupled_climate_feedback: true,
+            defer_initial_feedback: true,
 
             soil_biome_influence: 0.55,
             riparian_river_multiplier: 2.2,

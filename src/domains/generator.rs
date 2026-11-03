@@ -15,12 +15,14 @@ use std::{
 use crate::{
     domains::{
         civilization::{CivilizationLayer, prepare_civilization_substrate},
-        climate::{ClimateConfig, ClimateLayer, simulate_all_seasons},
+        climate::{ClimateConfig, ClimateLayer, ClimateSolverCache, simulate_all_seasons},
         hydrology::{
             HydrologyConfig, HydrologyLayer, apply_surface_feedback_to_climate, simulate_hydrology,
         },
         tectonics::{
-            GeologyLayer, TectonicsConfig, generate_hotspots, generate_plates, simulate_tectonics,
+            GeologyLayer, TectonicEvolutionConfig, TectonicsConfig, TectonicsGeometryCache,
+            TectonicsScratch, finalize_tectonics, generate_hotspots, generate_plates,
+            prepare_tectonics_scratch, simulate_tectonics, step_tectonics,
         },
     },
     world::{
@@ -38,13 +40,32 @@ const HYDROLOGY_STEPS: usize = 5;
 /// Дополнительные шаги при включенной обратной связи (1 шаг фидбека + Климат + Биосфера)
 const COUPLED_EXTRA_STEPS: usize = 1 + CLIMATE_STEPS + HYDROLOGY_STEPS;
 
-/// Ресурс-запрос: позволяет UI или хоткеям заказать фоновую генерацию без блокировки экрана
+/// Запрос фоновой генерации. Эволюция отличается от полной регенерации геологии.
 #[derive(Resource, Default)]
-pub struct GenerationRequest(pub Option<PipelineStage>);
+pub struct GenerationRequest {
+    pub stage: Option<PipelineStage>,
+    pub evolve_plates: bool,
+}
 
 impl GenerationRequest {
     pub fn request(&mut self, stage: PipelineStage) {
-        self.0 = Some(stage);
+        self.stage = Some(stage);
+        self.evolve_plates = false;
+    }
+
+    pub fn request_evolve(&mut self, stage: PipelineStage) {
+        self.stage = Some(stage);
+        self.evolve_plates = true;
+    }
+
+    pub fn is_pending(&self) -> bool {
+        self.stage.is_some()
+    }
+
+    pub(crate) fn take(&mut self) -> Option<(PipelineStage, bool)> {
+        let stage = self.stage.take();
+        let evolve = std::mem::take(&mut self.evolve_plates);
+        stage.map(|stage| (stage, evolve))
     }
 }
 
@@ -192,29 +213,36 @@ pub fn spawn_generation_task(
     topology: Res<WorldTopology>,
     geology: Res<GeologyLayer>,
     t_config: Res<TectonicsConfig>,
+    t_evolution_config: Res<TectonicEvolutionConfig>,
     c_config: Res<ClimateConfig>,
     climate: Res<ClimateLayer>,
     h_config: Res<HydrologyConfig>,
 ) {
-    let Some(stage) = req.0.take() else {
+    let Some((stage, evolve_requested)) = req.take() else {
         return;
     };
+    let is_initial = geology.elevations.is_empty();
+    let evolve = evolve_requested && !is_initial && geology.plates.len() >= 3;
+    if evolve_requested && !evolve {
+        warn!("Запрос эволюции проигнорирован: существующая геология ещё не готова");
+        return;
+    }
+
     next_state.set(AppState::InGame);
 
     for entity in existing_tasks.iter() {
         commands.entity(entity).despawn();
     }
-
-    let is_initial = geology.elevations.is_empty();
     let seed = world_config.seed;
 
     let thread_pool = AsyncComputeTaskPool::get();
     let topology = (*topology).clone();
     let t_config = (*t_config).clone();
+    let t_evolution_config = (*t_evolution_config).clone();
     let c_config = (*c_config).clone();
     let h_config = (*h_config).clone();
 
-    let existing_geology = if stage > PipelineStage::Tectonics {
+    let existing_geology = if stage > PipelineStage::Tectonics || evolve {
         Some((*geology).clone())
     } else {
         None
@@ -227,12 +255,20 @@ pub fn spawn_generation_task(
     };
 
     let coupled = h_config.coupled_climate_feedback;
+    // Feedback в первичной генерации может быть отложен (см. HydrologyConfig).
+    let should_run_feedback_on_initial = coupled && !h_config.defer_initial_feedback;
+    let tectonics_steps = if evolve {
+        TECTONICS_STEPS - 1
+    } else {
+        TECTONICS_STEPS
+    };
     let base_steps = match stage {
-        PipelineStage::Tectonics => TECTONICS_STEPS + CLIMATE_STEPS + HYDROLOGY_STEPS,
+        PipelineStage::Tectonics => tectonics_steps + CLIMATE_STEPS + HYDROLOGY_STEPS,
         PipelineStage::Climate => CLIMATE_STEPS + HYDROLOGY_STEPS,
         PipelineStage::Hydrology => HYDROLOGY_STEPS,
     };
-    let total_steps = if coupled {
+    // total_steps — это только для прогресс-бара. Точность здесь не критична.
+    let total_steps = if should_run_feedback_on_initial {
         base_steps + COUPLED_EXTRA_STEPS
     } else {
         base_steps
@@ -242,15 +278,57 @@ pub fn spawn_generation_task(
     let logger_clone = logger.clone();
 
     info!(
-        "🚀 Старт генерации (сид: {}, стадия: {:?}, обратная связь: {})...",
-        seed, stage, coupled
+        "🚀 Старт генерации (сид: {}, стадия: {:?}, эволюция: {}, обратная связь: {})...",
+        seed, stage, evolve, coupled
     );
 
     let task = thread_pool.spawn(async move {
         let _ = thread_priority::set_current_thread_priority(thread_priority::ThreadPriority::Min);
 
-        // === 1. ТЕКТОНИКА (4 шага внутри, если нужна) ===
-        let (geology_ref, new_geology) = if let Some(geo) = existing_geology {
+        // Кэш для климатического солвера: precalc + scratch переиспользуются
+        // между первым проходом и feedback-проходом (экономит ~80-150 мс).
+        let mut climate_cache = ClimateSolverCache::new();
+
+        // === 1. ТЕКТОНИКА ===
+        let (geology_ref, new_geology) = if evolve {
+            // Продолжаем существующую геологию новой физической моделью.
+            // Не вызываем init_tectonics(): она сбрасывает sim_step и повторно
+            // проецирует/инициализирует поля как для новой геологии.
+            logger_clone.start_step("Эволюция тектоники: подготовка границ и физические шаги...");
+            let mut geo =
+                existing_geology.expect("tectonic evolution requires an existing geology layer");
+            let cache = TectonicsGeometryCache::get_or_build(&topology);
+            let mut scratch = TectonicsScratch::default();
+
+            if prepare_tectonics_scratch(&topology, &cache, &mut geo, &mut scratch, &t_config) {
+                let steps = t_evolution_config.steps_per_epoch.clamp(1, 32);
+                for _ in 0..steps {
+                    step_tectonics(
+                        &topology,
+                        &cache,
+                        &mut geo,
+                        &mut scratch,
+                        &t_config,
+                        t_config.time_step,
+                    );
+                }
+
+                let perlin = Fbm::<Perlin>::new(seed);
+                finalize_tectonics(
+                    &topology,
+                    &cache,
+                    &mut geo,
+                    &perlin,
+                    &t_config,
+                    Some(&logger_clone),
+                );
+                let geo_ref = geo.clone();
+                (geo_ref, Some(geo))
+            } else {
+                warn!("Эволюция тектоники пропущена: геология не прошла проверку готовности");
+                (geo, None)
+            }
+        } else if let Some(geo) = existing_geology {
             (geo, None)
         } else {
             logger_clone.start_step("Тектоника: генерация плит, кратонов и плюмов...");
@@ -261,17 +339,16 @@ pub fn spawn_generation_task(
             geology.resize(topology.cells.len());
             geology.plates = generate_plates(&mut rng, &t_config);
             geology.volcanoes = generate_hotspots(&mut rng, &geology.plates, &t_config);
-
             simulate_tectonics(&topology, &mut geology, &perlin, &t_config, &logger_clone);
 
-            let geo_clone = geology.clone();
-            (geo_clone, Some(geology))
+            let geo_ref = geology.clone();
+            (geo_ref, Some(geology))
         };
 
         let mut hydrology = HydrologyLayer::default();
 
         // === 2. КЛИМАТ И БИОСФЕРА / ГИДРОЛОГИЯ ===
-        let (climate_ref, new_climate) = if let Some(mut clim) = existing_climate {
+        let new_climate = if let Some(mut clim) = existing_climate {
             // Заказан пересчет только со стадии Hydrology (5 шагов внутри)
             simulate_hydrology(
                 &topology,
@@ -299,6 +376,7 @@ pub fn spawn_generation_task(
                     &c_config,
                     seed,
                     &logger_clone,
+                    Some(&mut climate_cache),
                 );
                 simulate_hydrology(
                     &topology,
@@ -309,10 +387,9 @@ pub fn spawn_generation_task(
                     seed,
                     &logger_clone,
                 );
-                let c_clone = clim.clone();
-                (c_clone, Some(clim))
+                Some(clim)
             } else {
-                (clim, None)
+                None
             }
         } else {
             // Проход 1: Первичный климат (3 шага) + Первичная биосфера (5 шагов)
@@ -330,6 +407,7 @@ pub fn spawn_generation_task(
                 &c_config,
                 seed,
                 &logger_clone,
+                Some(&mut climate_cache),
             );
 
             simulate_hydrology(
@@ -343,7 +421,9 @@ pub fn spawn_generation_task(
             );
 
             // Проход 2: Обратная связь (1 шаг + 3 шага климата + 5 шагов биосферы)
-            if coupled {
+            // Пропускается при defer_initial_feedback = true (по умолчанию).
+            // Пользователь может запустить кнопкой в Hydrology UI.
+            if should_run_feedback_on_initial {
                 logger_clone.start_step("Обратная связь: влияние биомов и озёр на климат...");
                 apply_surface_feedback_to_climate(
                     &geology_ref,
@@ -359,6 +439,7 @@ pub fn spawn_generation_task(
                     &c_config,
                     seed,
                     &logger_clone,
+                    Some(&mut climate_cache),
                 );
                 simulate_hydrology(
                     &topology,
@@ -371,11 +452,9 @@ pub fn spawn_generation_task(
                 );
             }
 
-            let clim_clone = climate.clone();
-            (clim_clone, Some(climate))
+            Some(climate)
         };
 
-        let _ = climate_ref;
         (new_geology, new_climate, hydrology)
     });
 

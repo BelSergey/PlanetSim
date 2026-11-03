@@ -9,7 +9,7 @@ use crate::domains::tectonics::tectonics_data::GeologyLayer;
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub enum SoilType {
     #[default]
-    Ocean,     // Морское дно
+    Ocean, // Морское дно
     Leptosol,  // Горные скелетные почвы и скальные выходы на крутых склонах
     Gelisol,   // Мерзлотные тундровые почвы (вечная мерзлота, водоупор)
     Podzol,    // Кислотные подзолистые почвы холодных лесов (на песках и гранитах)
@@ -25,7 +25,7 @@ pub enum SoilType {
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub enum Biome {
     #[default]
-    DeepOcean,    // Глубокий океан
+    DeepOcean, // Глубокий океан
     ShallowOcean, // Шельфовое мелководье и рифы
     SeaIce,       // Многолетний морской лед
 

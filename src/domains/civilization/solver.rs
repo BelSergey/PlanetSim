@@ -186,8 +186,7 @@ pub fn prepare_civilization_substrate(
             _ => 0.25,
         };
         let river_bonus = if flow >= river_thresh { 0.15 } else { 0.0 };
-        civ.base_friction[i] =
-            (rugged * 0.65 + biome_fric * 0.55 - river_bonus).clamp(0.04, 0.96);
+        civ.base_friction[i] = (rugged * 0.65 + biome_fric * 0.55 - river_bonus).clamp(0.04, 0.96);
 
         // 4. Пригодность клетки для жизни: берем лучший уклад + бонус от суммы остальных
         let best_food = forage.max(arable).max(pastoral).max(fish);
@@ -213,15 +212,14 @@ pub fn prepare_civilization_substrate(
     // В норме должна приходить из civ_palettes / WorldConfig.
     let species_palette: &[u32] = &[
         (hash_u32(seed ^ 0xA1B2_C3D4) | 1) & 0xFFFF_FFFE, // люди
-        // (hash_u32(seed ^ 0x1234_5678) | 1) & 0xFFFF_FFFE, // эльфы
-        // (hash_u32(seed ^ 0x8765_4321) | 1) & 0xFFFF_FFFE, // орки
+                                                          // (hash_u32(seed ^ 0x1234_5678) | 1) & 0xFFFF_FFFE, // эльфы
+                                                          // (hash_u32(seed ^ 0x8765_4321) | 1) & 0xFFFF_FFFE, // орки
     ];
 
     for (idx, &(cell_idx, _)) in candidates.iter().take(spawn_count).enumerate() {
         let mask = civ.env_masks[cell_idx];
         let species_id = species_palette[idx % species_palette.len()];
-        let clan_id =
-            (hash_u32(seed ^ (cell_idx as u32).wrapping_mul(53)) | 1) & 0xFFFF_FFFE;
+        let clan_id = (hash_u32(seed ^ (cell_idx as u32).wrapping_mul(53)) | 1) & 0xFFFF_FFFE;
 
         // Слой 0: Раса / Популяция
         civ.cells[cell_idx].entity_id[0] = species_id;
@@ -324,10 +322,10 @@ pub fn step_civilization_simulation(
             let mut max_weighted = 0.0_f32;
             let mut sum_weighted = 0.0_f32;
             let mut aff_sum = 0.0_f32;
-            for f_idx in 0..5 {
+            for (f_idx, &env_val) in env_factors.iter().enumerate() {
                 let w = spec.env_affinity[f_idx];
                 let mastery_mult = if my_ideas.has_bit(f_idx) { 1.30 } else { 0.95 };
-                let val = env_factors[f_idx] * w * mastery_mult;
+                let val = env_val * w * mastery_mult;
                 if val > max_weighted {
                     max_weighted = val;
                 }
@@ -346,9 +344,9 @@ pub fn step_civilization_simulation(
             let tech_cap_bonus = (unlocked_func_bits * 0.022).clamp(0.0, 0.65);
 
             let mut cross_push = 0.0_f32;
-            for m in 0..NUM_SOC_LAYERS {
+            for (m, &w_km) in cross_matrix[k].iter().enumerate() {
                 if m != k {
-                    cross_push += cross_matrix[k][m] * cur.strength[m];
+                    cross_push += w_km * cur.strength[m];
                 }
             }
 
@@ -412,9 +410,8 @@ pub fn step_civilization_simulation(
                             {
                                 push *= 1.55;
                             } else {
-                                let cultural_affinity = n_cell.ideas[k].jaccard_similarity(
-                                    &cur.ideas[SocLayerKind::Culture.index()],
-                                );
+                                let cultural_affinity = n_cell.ideas[k]
+                                    .jaccard_similarity(&cur.ideas[SocLayerKind::Culture.index()]);
                                 push *= 0.65 + 0.35 * cultural_affinity;
                             }
                         }
@@ -488,10 +485,9 @@ pub fn step_civilization_simulation(
                 let inertia = (my_s - cur.prev_strength[k]) * 0.20;
                 let spatial_pull =
                     neighbor_max_s * (spec.spatial_diffusion * 0.45) + neighbor_avg_s * 0.25;
-                let target_s = (local_capacity.max(spatial_pull) * 0.85
-                    + spatial_pull * 0.25
-                    + inertia)
-                    .clamp(0.0, local_capacity.max(0.15));
+                let target_s =
+                    (local_capacity.max(spatial_pull) * 0.85 + spatial_pull * 0.25 + inertia)
+                        .clamp(0.0, local_capacity.max(0.15));
                 (my_s + spec.speed * (target_s - my_s)).clamp(0.05, 1.0)
             } else {
                 0.0
@@ -510,8 +506,8 @@ pub fn step_civilization_simulation(
                     let cell_cult_tag = cur.entity_id[SocLayerKind::Culture.index()] & 0xFFFF;
                     if state_cult_tag != 0 && cell_cult_tag != 0 && state_cult_tag != cell_cult_tag
                     {
-                        let syncretism = new_ideas
-                            .jaccard_similarity(&cur.ideas[SocLayerKind::Culture.index()]);
+                        let syncretism =
+                            new_ideas.jaccard_similarity(&cur.ideas[SocLayerKind::Culture.index()]);
                         cultural_unrest = (1.0 - syncretism) * 0.22;
                     }
                 }
@@ -533,8 +529,8 @@ pub fn step_civilization_simulation(
                             && best_rival_push < my_defense * 1.35
                             && cell_rng < 0.35
                         {
-                            let hybrid_id = (hash_u32(new_id ^ best_rival_id ^ tick_u32) | 1)
-                                & 0xFFFF_FFFE;
+                            let hybrid_id =
+                                (hash_u32(new_id ^ best_rival_id ^ tick_u32) | 1) & 0xFFFF_FFFE;
                             new_id = hybrid_id;
                             new_ideas = new_ideas
                                 .hybrid_crossover(&best_rival_ideas, tick_u32 as u64)
@@ -552,7 +548,10 @@ pub fn step_civilization_simulation(
                             new_stress = 0.20;
                         }
                     // отключим для рас но вообще надо бы прокинуть через конфиг
-                    } else if isolation > 0.55 && cell_rng < 0.25 && k != SocLayerKind::Species.index() {
+                    } else if isolation > 0.55
+                        && cell_rng < 0.25
+                        && k != SocLayerKind::Species.index()
+                    {
                         let rebel_uid =
                             (hash_u32(new_id ^ (i as u32) ^ tick_u32) | 1) & 0xFFFF_FFFE;
                         new_id = if k == SocLayerKind::Polity.index() {

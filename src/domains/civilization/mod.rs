@@ -8,14 +8,14 @@ pub mod solver;
 
 use bevy::prelude::*;
 
-pub use civ_config::{CivilizationConfig, InstitutionSpec};
-pub use civ_data::{
-    CellSocState, CivilizationLayer, IDEA_WORDS, IdeaBits, NUM_SOC_LAYERS, SocLayerKind,
-};
+pub use civ_config::CivilizationConfig;
+pub use civ_data::{CivilizationLayer, SocLayerKind};
 pub use solver::{prepare_civilization_substrate, step_civilization_simulation};
 
 use crate::{
-    domains::{climate::climate_data::ClimateLayer, hydrology::HydrologyLayer, tectonics::GeologyLayer},
+    domains::{
+        climate::climate_data::ClimateLayer, hydrology::HydrologyLayer, tectonics::GeologyLayer,
+    },
     world::{
         WorldConfig,
         pipeline::{PipelineSet, WorldPipeline},

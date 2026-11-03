@@ -1,6 +1,6 @@
 // src/domains/tectonics/solver/ocean.rs
 
-use super::{smoothstep, TectonicsGeometryCache};
+use super::{TectonicsGeometryCache, smoothstep};
 use crate::{
     domains::tectonics::{tectonics_config::TectonicsConfig, tectonics_data::GeologyLayer},
     world::topology::WorldTopology,
@@ -58,23 +58,21 @@ pub fn compute_oceans_and_continentality(
                 geology.is_ocean[cell_id] = true;
             }
         } else {
-            // Запертый внутри материка остаточный бассейн (заполняется осадками снизу до trapped_basin_floor_elev без инверсии краёв)
+            // Запертый внутри материка остаточный бассейн
             for cell_id in current_body {
                 geology.is_ocean[cell_id] = false;
                 let h = geology.elevations[cell_id];
                 if h < config.trapped_basin_floor_elev {
                     let infill = config.trapped_basin_floor_elev - h;
                     geology.sediment_thickness[cell_id] += infill * 14.0;
-                    geology.crust_density[cell_id] =
-                        geology.crust_density[cell_id].min(2760.0);
-                    geology.elevations[cell_id] =
-                        config.trapped_basin_floor_elev - infill * 0.12;
+                    geology.crust_density[cell_id] = geology.crust_density[cell_id].min(2760.0);
+                    geology.elevations[cell_id] = config.trapped_basin_floor_elev - infill * 0.12;
                 }
             }
         }
     }
 
-    // 2. Вся суша (включая не-океанические низменности с elev <= 0.0) также учитывается в проверке крупных массивов суши
+    // 2. Крупные массивы суши (включая не-океанические низменности с elev <= 0.0)
     visited.fill(false);
     is_major_land.fill(false);
     for i in 0..num_cells {
@@ -141,14 +139,23 @@ pub fn compute_oceans_and_continentality(
     let avg_hex_rad = cache.avg_cell_rad;
 
     // 5. Знаковая континентальность [-1.0 .. +1.0]
-    for i in 0..num_cells {
-        geology.continentality[i] = if geology.is_ocean[i] {
+    let is_ocean = &geology.is_ocean;
+    let ocean_scale = config.ocean_continentality_scale.max(0.01);
+    let land_scale = config.land_continentality_scale.max(0.01);
+
+    for (i, c) in geology
+        .continentality
+        .iter_mut()
+        .enumerate()
+        .take(num_cells)
+    {
+        *c = if is_ocean[i] {
             let physical_dist = dist_to_land_steps[i] as f32 * avg_hex_rad;
-            let norm = (physical_dist / config.ocean_continentality_scale.max(0.01)).min(1.0);
+            let norm = (physical_dist / ocean_scale).min(1.0);
             -smoothstep(norm)
         } else {
             let physical_dist = dist_to_ocean_steps[i] as f32 * avg_hex_rad;
-            let norm = (physical_dist / config.land_continentality_scale.max(0.01)).min(1.0);
+            let norm = (physical_dist / land_scale).min(1.0);
             smoothstep(norm)
         };
     }

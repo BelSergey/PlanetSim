@@ -141,7 +141,7 @@ impl IdeaBits {
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub enum SocLayerKind {
     #[default]
-    Species = 0,   // 0: Раса / Биологический вид и плотность заселения
+    Species = 0, // 0: Раса / Биологический вид и плотность заселения
     Kinship = 1,   // 1: Род / Клан / Племенной строй
     Culture = 2,   // 2: Культура / Этноязыковая общность
     Religion = 3,  // 3: Миф / Религия / Идеология

@@ -1,6 +1,6 @@
 // src/domains/tectonics/solver/init.rs
 
-use super::{smoothstep, TectonicsGeometryCache, TectonicsScratch};
+use super::{TectonicsGeometryCache, TectonicsScratch, smoothstep};
 use crate::{
     domains::tectonics::{
         tectonics_config::TectonicsConfig,
@@ -10,7 +10,7 @@ use crate::{
 };
 use bevy::math::{Quat, Vec3};
 use noise::NoiseFn;
-use rand::{rngs::StdRng, RngExt, SeedableRng};
+use rand::{RngExt, SeedableRng, rngs::StdRng};
 use std::f32::consts::PI;
 
 fn random_tangent(normal: Vec3, angle: f32) -> Vec3 {

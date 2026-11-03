@@ -1,6 +1,6 @@
 // src/domains/hydrology/solver/lakes.rs
 
-use std::{cmp::Ordering, collections::BinaryHeap, collections::HashMap, f32::consts::PI};
+use std::{cmp::Ordering, collections::BinaryHeap, f32::consts::PI};
 
 use crate::{
     domains::{
@@ -81,21 +81,20 @@ pub(super) fn compute_lakes_and_basins(
         }
     }
 
-    if heap.is_empty() {
-        if let Some((min_id, &min_h)) = geology
+    if heap.is_empty()
+        && let Some((min_id, &min_h)) = geology
             .elevations
             .iter()
             .enumerate()
             .min_by(|a, b| a.1.total_cmp(b.1))
-        {
-            visited[min_id] = true;
-            sill_elev[min_id] = min_h;
-            endorheic_sinks[min_id] = true;
-            heap.push(FloodNode {
-                elev: min_h,
-                cell_id: min_id,
-            });
-        }
+    {
+        visited[min_id] = true;
+        sill_elev[min_id] = min_h;
+        endorheic_sinks[min_id] = true;
+        heap.push(FloodNode {
+            elev: min_h,
+            cell_id: min_id,
+        });
     }
 
     let min_depth = config.min_lake_depth.max(0.002);
@@ -138,10 +137,14 @@ pub(super) fn compute_lakes_and_basins(
 
     // 2. СЧИТАЕМ ПРИТОК ВОДЫ В КАЖДУЮ КОТЛОВИНУ
     let mut pass1_flow = vec![0.0_f32; num_cells];
-    for i in 0..num_cells {
-        if !geology.is_ocean_cell(i) {
-            pass1_flow[i] = hydrology.runoff[i] * cell_area;
-        }
+    let is_ocean = &geology.is_ocean;
+    let runoff = &hydrology.runoff;
+    for (i, flow) in pass1_flow.iter_mut().enumerate().take(num_cells) {
+        *flow = if !is_ocean[i] {
+            runoff[i] * cell_area
+        } else {
+            0.0
+        };
     }
 
     for &u in pass1_order.iter().rev() {
@@ -154,11 +157,10 @@ pub(super) fn compute_lakes_and_basins(
         }
     }
 
-    let mut basins: HashMap<usize, Vec<usize>> = HashMap::new();
-    for i in 0..num_cells {
-        let outlet = basin_outlet[i];
+    let mut basins: Vec<Vec<usize>> = vec![Vec::new(); num_cells];
+    for (i, &outlet) in basin_outlet.iter().enumerate().take(num_cells) {
         if outlet != usize::MAX {
-            basins.entry(outlet).or_default().push(i);
+            basins[outlet].push(i);
         }
     }
 
@@ -169,17 +171,17 @@ pub(super) fn compute_lakes_and_basins(
     let river_incision_depth = (config.min_lake_depth * 9.5).max(0.022);
 
     // 3. ВОДНЫЙ БАЛАНС И ЭРОЗИОННЫЙ ПРОРЫВ ПОРОГОВ (SILL BREACHING)
-    for (outlet, mut b_cells) in basins {
+    for (outlet, mut b_cells) in basins.into_iter().enumerate() {
         if b_cells.is_empty() {
             continue;
         }
 
         let mut total_inflow = 0.0_f32;
         for &c in &b_cells {
-            if let Some(k) = pass1_dir[c] {
-                if topology.cells[c].neighbors[k as usize] == outlet {
-                    total_inflow += pass1_flow[c];
-                }
+            if let Some(k) = pass1_dir[c]
+                && topology.cells[c].neighbors[k as usize] == outlet
+            {
+                total_inflow += pass1_flow[c];
             }
         }
 
@@ -229,7 +231,8 @@ pub(super) fn compute_lakes_and_basins(
         if total_inflow >= full_basin_evap {
             // СЛУЧАЙ А: ПРОТОЧНОЕ ПРЕСНОЕ ОЗЕРО (вытекающая река прорезает порог перелива на глубину incision,
             // поэтому озеро заполняет только глубокое ядро долины!)
-            let incised_sill = rim_sill_elev - (max_basin_depth * 0.62).min(river_incision_depth * 1.6);
+            let incised_sill =
+                rim_sill_elev - (max_basin_depth * 0.62).min(river_incision_depth * 1.6);
             let flooded_cells: Vec<usize> = b_cells
                 .iter()
                 .copied()

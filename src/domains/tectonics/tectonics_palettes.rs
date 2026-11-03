@@ -1,22 +1,23 @@
 // src/domains/tectonics/tectonics_palettes.rs
 
 use super::tectonics_data::{GeologyLayer, RockType};
-use crate::domains::palettes::{rgb_u8, LegendEntry, MapLegend};
+use crate::domains::palettes::{LegendEntry, MapLegend, rgb_u8};
 use bevy::color::{Color, ColorToComponents};
 use bevy::prelude::*;
+use rayon::prelude::*;
 
 pub fn build_lithology_colors(geology: &GeologyLayer) -> Vec<[f32; 4]> {
     let has_ocean_mask = geology.is_ocean.len() == geology.lithology.len();
 
     geology
         .lithology
-        .iter()
+        .par_iter()
         .enumerate()
         .map(|(i, &rock)| {
             let is_ocean = if has_ocean_mask {
                 geology.is_ocean[i]
             } else {
-                geology.elevations[i] <= 0.0
+                geology.elevations.get(i).copied().unwrap_or(0.0) <= 0.0
             };
 
             let base_rgb = match rock {
@@ -50,7 +51,7 @@ pub fn build_elevation_colors(geology: &GeologyLayer) -> Vec<[f32; 4]> {
 
     geology
         .elevations
-        .iter()
+        .par_iter()
         .enumerate()
         .map(|(i, &h)| {
             let is_ocean = if has_ocean_mask {
@@ -76,7 +77,7 @@ pub fn build_plate_colors(geology: &GeologyLayer) -> Vec<[f32; 4]> {
 
     geology
         .plate_ids
-        .iter()
+        .par_iter()
         .enumerate()
         .map(|(i, &plate_id)| {
             if geology.volcano_mask.get(i).copied().unwrap_or(false) {
@@ -90,7 +91,7 @@ pub fn build_plate_colors(geology: &GeologyLayer) -> Vec<[f32; 4]> {
             let is_cont = if has_density {
                 geology.is_continental_crust(i)
             } else {
-                geology.elevations[i] > 0.0
+                geology.elevations.get(i).copied().unwrap_or(0.0) > 0.0
             };
 
             let hue = plate.color_hue;
@@ -124,13 +125,13 @@ pub fn build_ruggedness_colors(geology: &GeologyLayer) -> Vec<[f32; 4]> {
 
     geology
         .terrain_ruggedness
-        .iter()
+        .par_iter()
         .enumerate()
         .map(|(i, &rug)| {
             let is_ocean = if has_ocean_mask {
                 geology.is_ocean[i]
             } else {
-                geology.elevations[i] <= 0.0
+                geology.elevations.get(i).copied().unwrap_or(0.0) <= 0.0
             };
             let r_val = rug.clamp(0.0, 1.0);
 
@@ -161,10 +162,14 @@ pub fn build_ruggedness_colors(geology: &GeologyLayer) -> Vec<[f32; 4]> {
 pub fn build_crust_age_colors(geology: &GeologyLayer) -> Vec<[f32; 4]> {
     geology
         .crust_age
-        .iter()
+        .par_iter()
         .enumerate()
         .map(|(i, &age)| {
-            if geology.is_continental_crust(i) {
+            let is_continental = geology
+                .crust_density
+                .get(i)
+                .is_some_and(|density| *density < 2835.0);
+            if is_continental {
                 let t = ((age - 0.5) / 2.5).clamp(0.0, 1.0);
                 Color::srgb(0.62 + t * 0.22, 0.48 + t * 0.18, 0.28)
                     .to_linear()
@@ -184,7 +189,7 @@ pub fn build_crust_age_colors(geology: &GeologyLayer) -> Vec<[f32; 4]> {
 pub fn build_tectonic_stress_colors(geology: &GeologyLayer) -> Vec<[f32; 4]> {
     geology
         .tectonic_stress
-        .iter()
+        .par_iter()
         .map(|&s| {
             let val = s.clamp(-1.0, 1.0);
             if val < 0.0 {
@@ -208,30 +213,73 @@ pub fn elevation_legend() -> MapLegend {
     MapLegend {
         title: "Рельеф",
         entries: vec![
-            LegendEntry { rgb: rgb_u8(0.05, 0.02, 0.01), label: "Абиссаль  (≤ −0.44)".into() },
-            LegendEntry { rgb: rgb_u8(0.15, 0.08, 0.04), label: "Глубокий океан  (−0.44…−0.16)".into() },
-            LegendEntry { rgb: rgb_u8(0.30, 0.17, 0.09), label: "Океан  (−0.16…−0.02)".into() },
-            LegendEntry { rgb: rgb_u8(0.50, 0.32, 0.17), label: "Шельф / берег  (~0)".into() },
-            LegendEntry { rgb: rgb_u8(0.46, 0.29, 0.15), label: "Равнины и впадины суши".into() },
-            LegendEntry { rgb: rgb_u8(0.62, 0.40, 0.20), label: "Возвышенности  (0.12…0.32)".into() },
-            LegendEntry { rgb: rgb_u8(0.78, 0.46, 0.19), label: "Предгорья  (0.32…0.50)".into() },
-            LegendEntry { rgb: rgb_u8(0.87, 0.33, 0.12), label: "Горы  (0.50…0.64)".into() },
-            LegendEntry { rgb: rgb_u8(0.95, 0.18, 0.10), label: "Пики  (≥ 0.64)".into() },
+            LegendEntry {
+                rgb: rgb_u8(0.05, 0.02, 0.01),
+                label: "Абиссаль  (≤ −0.44)".into(),
+            },
+            LegendEntry {
+                rgb: rgb_u8(0.15, 0.08, 0.04),
+                label: "Глубокий океан  (−0.44…−0.16)".into(),
+            },
+            LegendEntry {
+                rgb: rgb_u8(0.30, 0.17, 0.09),
+                label: "Океан  (−0.16…−0.02)".into(),
+            },
+            LegendEntry {
+                rgb: rgb_u8(0.50, 0.32, 0.17),
+                label: "Шельф / берег  (~0)".into(),
+            },
+            LegendEntry {
+                rgb: rgb_u8(0.46, 0.29, 0.15),
+                label: "Равнины и впадины суши".into(),
+            },
+            LegendEntry {
+                rgb: rgb_u8(0.62, 0.40, 0.20),
+                label: "Возвышенности  (0.12…0.32)".into(),
+            },
+            LegendEntry {
+                rgb: rgb_u8(0.78, 0.46, 0.19),
+                label: "Предгорья  (0.32…0.50)".into(),
+            },
+            LegendEntry {
+                rgb: rgb_u8(0.87, 0.33, 0.12),
+                label: "Горы  (0.50…0.64)".into(),
+            },
+            LegendEntry {
+                rgb: rgb_u8(0.95, 0.18, 0.10),
+                label: "Пики  (≥ 0.64)".into(),
+            },
         ],
     }
 }
 
 pub fn lithology_legend() -> MapLegend {
     let rocks: &[(RockType, &str, [f32; 3])] = &[
-        (RockType::Granite,         "Гранит",               [0.92, 0.48, 0.58]),
-        (RockType::GneissSchist,    "Гнейсы / сланцы",      [0.64, 0.44, 0.74]),
-        (RockType::Andesite,        "Андезит",              [0.88, 0.32, 0.18]),
-        (RockType::FloodBasalt,     "Траппы (базальт)",     [0.28, 0.25, 0.30]),
-        (RockType::Sandstone,       "Песчаник",             [0.88, 0.76, 0.44]),
-        (RockType::ShaleClay,       "Глины / сланцы",       [0.52, 0.62, 0.45]),
-        (RockType::Limestone,       "Известняк",            [0.48, 0.84, 0.82]),
-        (RockType::OceanicBasalt,   "Океанический базальт", [0.16, 0.22, 0.34]),
-        (RockType::PelagicSediment, "Пелагические илы",     [0.26, 0.36, 0.48]),
+        (RockType::Granite, "Гранит", [0.92, 0.48, 0.58]),
+        (
+            RockType::GneissSchist,
+            "Гнейсы / сланцы",
+            [0.64, 0.44, 0.74],
+        ),
+        (RockType::Andesite, "Андезит", [0.88, 0.32, 0.18]),
+        (
+            RockType::FloodBasalt,
+            "Траппы (базальт)",
+            [0.28, 0.25, 0.30],
+        ),
+        (RockType::Sandstone, "Песчаник", [0.88, 0.76, 0.44]),
+        (RockType::ShaleClay, "Глины / сланцы", [0.52, 0.62, 0.45]),
+        (RockType::Limestone, "Известняк", [0.48, 0.84, 0.82]),
+        (
+            RockType::OceanicBasalt,
+            "Океанический базальт",
+            [0.16, 0.22, 0.34],
+        ),
+        (
+            RockType::PelagicSediment,
+            "Пелагические илы",
+            [0.26, 0.36, 0.48],
+        ),
     ];
     let _ = RockType::Granite;
     MapLegend {
@@ -270,10 +318,22 @@ pub fn ruggedness_legend() -> MapLegend {
     MapLegend {
         title: "Рельефность",
         entries: vec![
-            LegendEntry { rgb: rgb_u8(0.18, 0.56, 0.24), label: "Гладкие равнины  (0.00)".into() },
-            LegendEntry { rgb: rgb_u8(0.70, 0.72, 0.18), label: "Холмы и овраги  (0.25)".into() },
-            LegendEntry { rgb: rgb_u8(0.92, 0.30, 0.12), label: "Скалистые хребты  (0.60)".into() },
-            LegendEntry { rgb: rgb_u8(0.87, 0.75, 0.90), label: "Пики и каньоны  (1.00)".into() },
+            LegendEntry {
+                rgb: rgb_u8(0.18, 0.56, 0.24),
+                label: "Гладкие равнины  (0.00)".into(),
+            },
+            LegendEntry {
+                rgb: rgb_u8(0.70, 0.72, 0.18),
+                label: "Холмы и овраги  (0.25)".into(),
+            },
+            LegendEntry {
+                rgb: rgb_u8(0.92, 0.30, 0.12),
+                label: "Скалистые хребты  (0.60)".into(),
+            },
+            LegendEntry {
+                rgb: rgb_u8(0.87, 0.75, 0.90),
+                label: "Пики и каньоны  (1.00)".into(),
+            },
         ],
     }
 }

@@ -5,12 +5,7 @@ use bevy_egui::egui;
 
 use crate::{
     domains::tectonics::GeologyLayer,
-    world::{
-        WorldConfig,
-        pipeline::WorldPipeline,
-        start_new_planet,
-        topology::WorldTopology,
-    },
+    world::{WorldConfig, pipeline::WorldPipeline, start_new_planet, topology::WorldTopology},
 };
 
 /// Правая панель вкладки «Планета»: текущая планета, радиус, сид и запуск новой генерации.

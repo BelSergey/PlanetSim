@@ -1,8 +1,8 @@
 // src/domains/tectonics/solver/advection.rs:
 
 use super::{
-    boundaries::fast_domain_warp, init::find_closest_plates_and_boundary_dists,
-    TectonicsGeometryCache, TectonicsScratch,
+    TectonicsGeometryCache, TectonicsScratch, boundaries::fast_domain_warp,
+    init::find_closest_plates_and_boundary_dists,
 };
 use crate::{
     domains::tectonics::{tectonics_config::TectonicsConfig, tectonics_data::GeologyLayer},
@@ -29,8 +29,7 @@ pub fn advect_crust_and_plates(
     //    применяется только на малом радиусе `min_sep` (соответствующем `plate_min_area_ratio`),
     //    чтобы не блокировать поглощение малых плит, и напрямую учитывается в `omega`.
     if num_plates >= 2 && dt > 1e-6 {
-        let min_sep =
-            (4.0 * PI * config.plate_min_area_ratio.max(0.004)).sqrt() * 0.85;
+        let min_sep = (4.0 * PI * config.plate_min_area_ratio.max(0.004)).sqrt() * 0.85;
         let mut omega_corr = vec![Vec3::ZERO; num_plates];
 
         for i in 0..num_plates {
@@ -285,10 +284,15 @@ fn recycle_and_split_voronoi_plates(
             let db = b.dot(parent.center_dir).clamp(-1.0, 1.0).acos();
             da.total_cmp(&db)
         })
-        .unwrap_or_else(|| parent.euler_pole.cross(parent.center_dir).normalize_or_zero());
+        .unwrap_or_else(|| {
+            parent
+                .euler_pole
+                .cross(parent.center_dir)
+                .normalize_or_zero()
+        });
 
-    let tangent = (split_dir - parent.center_dir * parent.center_dir.dot(split_dir))
-        .normalize_or_zero();
+    let tangent =
+        (split_dir - parent.center_dir * parent.center_dir.dot(split_dir)).normalize_or_zero();
     if tangent == Vec3::ZERO {
         return;
     }
@@ -300,28 +304,27 @@ fn recycle_and_split_voronoi_plates(
     let new_child_center =
         (parent.center_dir * sep_angle.cos() + tangent * sep_angle.sin()).normalize_or_zero();
 
-    let (parent_craton_center, parent_craton_rad, child_craton_center, child_craton_rad) =
-        if parent.craton_radius > 0.04 {
-            let craton_tang = (tangent
-                - parent.craton_center * parent.craton_center.dot(tangent))
+    let (parent_craton_center, parent_craton_rad, child_craton_center, child_craton_rad) = if parent
+        .craton_radius
+        > 0.04
+    {
+        let craton_tang = (tangent - parent.craton_center * parent.craton_center.dot(tangent))
             .normalize_or_zero();
-            let craton_sep = (parent.craton_radius * 0.48).clamp(0.05, 0.28);
-            let c_parent = (parent.craton_center * craton_sep.cos()
-                - craton_tang * craton_sep.sin())
+        let craton_sep = (parent.craton_radius * 0.48).clamp(0.05, 0.28);
+        let c_parent = (parent.craton_center * craton_sep.cos() - craton_tang * craton_sep.sin())
             .normalize_or_zero();
-            let c_child = (parent.craton_center * craton_sep.cos()
-                + craton_tang * craton_sep.sin())
+        let c_child = (parent.craton_center * craton_sep.cos() + craton_tang * craton_sep.sin())
             .normalize_or_zero();
-            // Сумма площадей фрагментов (0.74^2 + 0.67^2 ≈ 1.0) сохраняет исходную площадь континента
-            (
-                c_parent,
-                parent.craton_radius * 0.74,
-                c_child,
-                parent.craton_radius * 0.67,
-            )
-        } else {
-            (new_parent_center, 0.0, new_child_center, 0.0)
-        };
+        // Сумма площадей фрагментов (0.74^2 + 0.67^2 ≈ 1.0) сохраняет исходную площадь континента
+        (
+            c_parent,
+            parent.craton_radius * 0.74,
+            c_child,
+            parent.craton_radius * 0.67,
+        )
+    } else {
+        (new_parent_center, 0.0, new_child_center, 0.0)
+    };
 
     let rot_parent = Quat::from_rotation_arc(parent.center_dir, new_parent_center);
     let rot_child = Quat::from_rotation_arc(parent.center_dir, new_child_center);

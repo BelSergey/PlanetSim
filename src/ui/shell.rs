@@ -12,11 +12,19 @@ use crate::{
         save::{SaveLoadTask, SaveUiState, draw_save_load_windows_system},
         tectonics::{GeologyLayer, tectonics_ui::draw_tectonics_tab_system},
     },
-    viewport::{MapOverlay, ViewportViewConfig},
+    simulation::clock::SimulationClock,
+    viewport::{
+        MapCameraAngle, MapOverlay, StarSystemRoot, SunVisualConfig, ViewMode,
+        ViewportLightingMode, ViewportViewConfig,
+    },
     world::{
         WorldConfig, pipeline::WorldPipeline, start_new_planet, topology::WorldTopology,
         world_ui::draw_world_tab,
     },
+};
+
+use crate::viewport::camera_3d::{
+    SystemInertia, default_camera_transform, default_transform_for_mode,
 };
 
 use super::ActiveTab;
@@ -148,6 +156,102 @@ fn draw_top_panel(ui: &mut egui::Ui, world: &mut World) -> egui::Rect {
                     start_new_planet(world, subdivs);
                 }
 
+                ui.separator();
+                world.resource_scope(|_world, mut clock: Mut<SimulationClock>| {
+                    let pause_label = if clock.paused { "▶" } else { "Ⅱ" };
+                    if ui.small_button(pause_label).on_hover_text("Пауза / продолжить симуляцию").clicked() {
+                        if clock.paused { clock.resume(); } else { clock.pause(); }
+                    }
+                    ui.add(
+                        egui::Slider::new(&mut clock.time_scale, 3_600.0..=31_536_000.0)
+                            .logarithmic(true)
+                            .show_value(false)
+                            .text("скорость"),
+                    );
+                    ui.push_id("day_display", |ui| {
+    // {:05.1} делает строку фиксированной ширины (например, "День 001.2")
+    ui.weak(format!("День {:05.1}", clock.elapsed_seconds / 86_400.0));
+});
+                });
+
+                if ui.small_button("⟲ Вид").on_hover_text("Сбросить поворот и масштаб текущего вида").clicked() {
+                    let view_mode = *world.resource::<ViewMode>();
+                    let map_angle = *world.resource::<MapCameraAngle>();
+                    let radius = world.resource::<WorldConfig>().radius;
+                    let mut roots = world.query_filtered::<(&mut Transform, &mut SystemInertia), With<StarSystemRoot>>();
+                    if let Ok((mut transform, mut inertia)) = roots.single_mut(world) {
+                        *transform = default_transform_for_mode(view_mode, map_angle);
+                        inertia.velocity = Vec2::ZERO;
+                    }
+                    let mut globes = world.query_filtered::<&mut Transform, With<crate::viewport::Globe>>();
+                    if let Ok(mut globe) = globes.single_mut(world) {
+                        globe.rotation = Quat::IDENTITY;
+                    }
+                    let mut cameras = world.query_filtered::<&mut Transform, With<Camera3d>>();
+                    if let Ok(mut camera) = cameras.single_mut(world) {
+                        *camera = default_camera_transform(radius, view_mode, map_angle);
+                    }
+                }
+
+                ui.separator();
+                let previous_mode = *world.resource::<ViewMode>();
+                let mut selected_mode = previous_mode;
+                ui.selectable_value(&mut selected_mode, ViewMode::StarSystem, "☀ Система")
+                    .on_hover_text("Орбита планеты и автоматическое вращение вокруг оси");
+                ui.selectable_value(&mut selected_mode, ViewMode::GlobeSolo, "🌍 Глобус")
+                    .on_hover_text("Глобус в центре без автовращения; свет и климат продолжают меняться");
+                ui.selectable_value(&mut selected_mode, ViewMode::Map3D, "🗺 3D-карта")
+                    .on_hover_text("Развёртка рельефа с динамическим солнечным освещением");
+                if selected_mode != previous_mode {
+                    *world.resource_mut::<ViewMode>() = selected_mode;
+                    let mut pipeline = world.resource_mut::<WorldPipeline>();
+                    pipeline.rebuild_mesh = true;
+                    pipeline.rebuild_rivers = true;
+                }
+
+                if selected_mode == ViewMode::Map3D {
+                    ui.separator();
+                    let old_angle = *world.resource::<MapCameraAngle>();
+                    let mut selected_angle = old_angle;
+                    ui.selectable_value(&mut selected_angle, MapCameraAngle::TopDown, "⬇ Сверху");
+                    ui.selectable_value(&mut selected_angle, MapCameraAngle::Isometric, "📐 Изометрия");
+                    if selected_angle != old_angle {
+                        *world.resource_mut::<MapCameraAngle>() = selected_angle;
+                    }
+                }
+
+                if selected_mode == ViewMode::StarSystem {
+                    world.resource_scope(|_world, mut sun_cfg: Mut<SunVisualConfig>| {
+                        let label = if sun_cfg.visible { "☀ Диск" } else { "◌ Диск скрыт" };
+                        if ui
+                            .selectable_label(sun_cfg.visible, label)
+                            .on_hover_text("Показывать или скрывать только видимый диск Солнца; освещение остаётся включённым")
+                            .clicked()
+                        {
+                            sun_cfg.visible = !sun_cfg.visible;
+                        }
+                    });
+                } else {
+                    let previous_lighting = *world.resource::<ViewportLightingMode>();
+                    let mut selected_lighting = previous_lighting;
+                    ui.separator();
+                    ui.selectable_value(
+                        &mut selected_lighting,
+                        ViewportLightingMode::Solar,
+                        "☀ Солнце",
+                    )
+                    .on_hover_text("Направленный свет: день и ночь меняются по времени и сезонам");
+                    ui.selectable_value(
+                        &mut selected_lighting,
+                        ViewportLightingMode::Global,
+                        "☼ Равномерно",
+                    )
+                    .on_hover_text("Постоянное освещение всей поверхности без ночной стороны");
+                    if selected_lighting != previous_lighting {
+                        *world.resource_mut::<ViewportLightingMode>() = selected_lighting;
+                    }
+                }
+
                 let subdivs = world.resource::<WorldTopology>().subdivisions;
                 let seed = world.resource::<WorldConfig>().seed;
                 let has_geo = !world.resource::<GeologyLayer>().elevations.is_empty();
@@ -197,10 +301,12 @@ fn draw_status_text(
         } else {
             "Ожидание генерации"
         };
-        ui.weak(format!(
-            " Сид: {} | subdiv {} | Статус: {}",
-            seed, subdivs, status
-        ));
+        ui.push_id("status_display", |ui| {
+            ui.weak(format!(
+                " Сид: {} | subdiv {} | Статус: {}",
+                seed, subdivs, status
+            ));
+        });
     }
 }
 
@@ -242,10 +348,7 @@ fn draw_left_panel(ui: &mut egui::Ui, world: &mut World) -> egui::Rect {
 
                 world.resource_scope(|_world, mut overlay: Mut<MapOverlay>| {
                     for (layer, label) in LAYERS.iter() {
-                        if ui
-                            .radio_value(&mut *overlay, layer.clone(), *label)
-                            .changed()
-                        {
+                        if ui.radio_value(&mut *overlay, *layer, *label).changed() {
                             recolor = true;
                         }
                     }
@@ -253,6 +356,15 @@ fn draw_left_panel(ui: &mut egui::Ui, world: &mut World) -> egui::Rect {
 
                 ui.separator();
                 ui.label("Модификаторы:");
+
+                if *world.resource::<ViewMode>() == ViewMode::StarSystem {
+                    world.resource_scope(|_world, mut sun_cfg: Mut<SunVisualConfig>| {
+                        ui.checkbox(&mut sun_cfg.visible, "Видимый диск Солнца")
+                            .on_hover_text(
+                                "Скрывает только сферу Солнца; источник света продолжает работать",
+                            );
+                    });
+                }
 
                 world.resource_scope(|_world, mut view_cfg: Mut<ViewportViewConfig>| {
                     if ui

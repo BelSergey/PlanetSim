@@ -31,6 +31,7 @@ pub(super) fn compute_runoff(
     let num_cells = topology.cells.len();
     let mut meander_bias = vec![0.0_f32; num_cells];
 
+    #[allow(clippy::needless_range_loop)]
     for i in 0..num_cells {
         let elev = geology.elevations[i];
         if geology.is_ocean_cell(i) {
@@ -217,103 +218,134 @@ pub(super) fn compute_soil_moisture(
     hydrology: &mut HydrologyLayer,
     config: &HydrologyConfig,
 ) {
+    use rayon::prelude::*;
+
     let num_cells = topology.cells.len();
-    let threshold = config.river_threshold.max(1e-6);
+    let mut soil_moisture = std::mem::take(&mut hydrology.soil_moisture);
+    let mut soils = std::mem::take(&mut hydrology.soils);
+    soil_moisture.resize(num_cells, 0.0);
+    soils.resize(num_cells, SoilType::Ocean);
 
-    for i in 0..num_cells {
-        if geology.is_ocean_cell(i) || hydrology.is_lake_cell(i) {
-            hydrology.soil_moisture[i] = 1.0;
-            continue;
-        }
+    let elevations = &geology.elevations;
+    let lithology = &geology.lithology;
+    let is_ocean = &geology.is_ocean;
+    let t_spring = &climate.spring.temperatures;
+    let t_summer = &climate.summer.temperatures;
+    let t_winter = &climate.winter.temperatures;
+    let p_spring = &climate.spring.precipitation;
+    let p_summer = &climate.summer.precipitation;
+    let p_winter = &climate.winter.precipitation;
 
-        let elev = geology.elevations[i];
-        let t_spring = climate.spring.temperatures[i];
-        let t_summer = climate.summer.temperatures[i];
-        let t_winter = climate.winter.temperatures[i];
-        let mean_temp = (2.0 * t_spring + t_summer + t_winter) * 0.25;
+    let water_capacity = &hydrology.water_capacity;
+    let soil_texture = &hydrology.soil_texture;
+    let permeability = &hydrology.permeability;
+    let flow_accumulation = &hydrology.flow_accumulation;
+    let lake_mask = &hydrology.lake_mask;
+    let is_salt_lake = &hydrology.is_salt_lake;
 
-        let p_spring = climate.spring.precipitation[i];
-        let p_summer = climate.summer.precipitation[i];
-        let p_winter = climate.winter.precipitation[i];
-        let annual_precip = (2.0 * p_spring + p_summer + p_winter) * 0.25;
+    let aridity_evap_scale = config.aridity_evap_scale;
+    let soil_biome_influence = config.soil_biome_influence;
+    let river_groundwater_seepage = config.river_groundwater_seepage;
+    let river_threshold = config.river_threshold.max(1e-6);
 
-        let whc = hydrology.water_capacity[i];
-        let [sand, _silt, clay] = hydrology.soil_texture[i];
-        let pet = ((mean_temp + 10.0).max(1.5) * 0.013 * config.aridity_evap_scale).max(0.025);
-
-        let retention_mod = 1.0 + (whc - 0.30) * config.soil_biome_influence
-            - (sand - 0.45).max(0.0) * 0.35 * config.soil_biome_influence;
-        let effective_infiltration = (annual_precip * retention_mod.clamp(0.5, 1.50))
-            * (1.0 - geology.lithology[i].karst_permeability() * 0.35);
-
-        let rain_soil_moisture = effective_infiltration / (effective_infiltration + pet * 0.7);
-
-        // Прямое увлажнение почвы рекой в самой клетке русла
-        let my_flow = hydrology.flow_accumulation[i];
-        let river_ratio = (my_flow / threshold).max(0.0);
-        let direct_river_moisture = if river_ratio > 0.25 {
-            (0.18 * river_ratio.powf(0.42) * config.river_groundwater_seepage).clamp(0.0, 0.78)
-        } else {
-            0.0
-        };
-
-        // Латеральная фильтрация грунтовых вод от соседних рек и берегов озёр
-        let mut valley_seepage = 0.0_f32;
-        let mut max_slope = 0.0_f32;
-        for &n_id in &topology.cells[i].neighbors {
-            let n_elev = geology.elevations[n_id];
-            let diff = (elev - n_elev).abs();
-            if diff > max_slope {
-                max_slope = diff;
+    soil_moisture
+        .par_iter_mut()
+        .zip(soils.par_iter_mut())
+        .enumerate()
+        .for_each(|(i, (sm_out, soil_out))| {
+            let cell_is_ocean = is_ocean
+                .get(i)
+                .copied()
+                .unwrap_or_else(|| elevations.get(i).copied().unwrap_or(0.0) <= 0.0);
+            if cell_is_ocean || lake_mask[i] {
+                *sm_out = 1.0;
+                return;
             }
 
-            if hydrology.is_lake_cell(n_id) {
-                // Берега пресных озёр получают сильную грунтовую подпитку, берега солёных — умеренную
-                let lake_seep = if hydrology.is_salt_lake[n_id] {
-                    0.22
+            let elev = elevations[i];
+            let mean_temp = (2.0 * t_spring[i] + t_summer[i] + t_winter[i]) * 0.25;
+            let annual_precip = (2.0 * p_spring[i] + p_summer[i] + p_winter[i]) * 0.25;
+
+            let whc = water_capacity[i];
+            let [sand, _silt, clay] = soil_texture[i];
+            let pet = ((mean_temp + 10.0).max(1.5) * 0.013 * aridity_evap_scale).max(0.025);
+
+            let retention_mod = 1.0 + (whc - 0.30) * soil_biome_influence
+                - (sand - 0.45).max(0.0) * 0.35 * soil_biome_influence;
+            let effective_infiltration = (annual_precip * retention_mod.clamp(0.5, 1.50))
+                * (1.0 - lithology[i].karst_permeability() * 0.35);
+
+            let rain_soil_moisture = effective_infiltration / (effective_infiltration + pet * 0.7);
+
+            let my_flow = flow_accumulation[i];
+            let river_ratio = (my_flow / river_threshold).max(0.0);
+            let direct_river_moisture = if river_ratio > 0.25 {
+                (0.18 * river_ratio.powf(0.42) * river_groundwater_seepage).clamp(0.0, 0.78)
+            } else {
+                0.0
+            };
+
+            let mut valley_seepage = 0.0_f32;
+            let mut max_slope = 0.0_f32;
+            for &n_id in &topology.cells[i].neighbors {
+                let n_elev = elevations[n_id];
+                let diff = (elev - n_elev).abs();
+                if diff > max_slope {
+                    max_slope = diff;
+                }
+
+                if lake_mask[n_id] {
+                    let lake_seep =
+                        if is_salt_lake[n_id] { 0.22 } else { 0.42 } * river_groundwater_seepage;
+                    valley_seepage = valley_seepage.max(lake_seep.clamp(0.0, 0.55));
                 } else {
-                    0.42
-                } * config.river_groundwater_seepage;
-                valley_seepage = valley_seepage.max(lake_seep.clamp(0.0, 0.55));
-            } else if !geology.is_ocean_cell(n_id) {
-                let n_flow_ratio = (hydrology.flow_accumulation[n_id] / threshold).max(0.0);
-                let height_above_river = (elev - n_elev).max(0.0);
-                if n_flow_ratio >= 0.8 && height_above_river < 0.022 {
-                    let elev_atten = 1.0 - (height_above_river / 0.022);
-                    let perm_factor = 0.45 + 0.55 * hydrology.permeability[i];
-                    let seep = 0.14
-                        * n_flow_ratio.powf(0.38)
-                        * elev_atten
-                        * perm_factor
-                        * config.river_groundwater_seepage;
-                    valley_seepage = valley_seepage.max(seep.clamp(0.0, 0.48));
+                    let n_ocean = is_ocean
+                        .get(n_id)
+                        .copied()
+                        .unwrap_or_else(|| elevations.get(n_id).copied().unwrap_or(0.0) <= 0.0);
+                    if !n_ocean {
+                        let n_flow_ratio = (flow_accumulation[n_id] / river_threshold).max(0.0);
+                        let h_above = (elev - n_elev).max(0.0);
+                        if n_flow_ratio >= 0.8 && h_above < 0.022 {
+                            let elev_atten = 1.0 - (h_above / 0.022);
+                            let perm_factor = 0.45 + 0.55 * permeability[i];
+                            let seep = 0.14
+                                * n_flow_ratio.powf(0.38)
+                                * elev_atten
+                                * perm_factor
+                                * river_groundwater_seepage;
+                            valley_seepage = valley_seepage.max(seep.clamp(0.0, 0.48));
+                        }
+                    }
                 }
             }
-        }
 
-        let lowland_bonus = if max_slope < 0.010 && clay > 0.35 && rain_soil_moisture > 0.35 {
-            0.12 * (1.0 - max_slope / 0.010)
-        } else {
-            0.0
-        };
+            let lowland_bonus = if max_slope < 0.010 && clay > 0.35 && rain_soil_moisture > 0.35 {
+                0.12 * (1.0 - max_slope / 0.010)
+            } else {
+                0.0
+            };
 
-        let total_sm = (rain_soil_moisture
-            + direct_river_moisture * (1.0 - rain_soil_moisture * 0.55)
-            + valley_seepage * (1.0 - rain_soil_moisture * 0.65)
-            + lowland_bonus)
-            .clamp(0.02, 1.0);
+            let total_sm = (rain_soil_moisture
+                + direct_river_moisture * (1.0 - rain_soil_moisture * 0.55)
+                + valley_seepage * (1.0 - rain_soil_moisture * 0.65)
+                + lowland_bonus)
+                .clamp(0.02, 1.0);
 
-        hydrology.soil_moisture[i] = total_sm;
+            *sm_out = total_sm;
 
-        if total_sm > 0.72
-            && elev < 0.15
-            && max_slope < 0.012
-            && matches!(
-                hydrology.soils[i],
-                SoilType::Aridisol | SoilType::Cambisol | SoilType::Chernozem
-            )
-        {
-            hydrology.soils[i] = SoilType::Gleysol;
-        }
-    }
+            if total_sm > 0.72
+                && elev < 0.15
+                && max_slope < 0.012
+                && matches!(
+                    *soil_out,
+                    SoilType::Aridisol | SoilType::Cambisol | SoilType::Chernozem
+                )
+            {
+                *soil_out = SoilType::Gleysol;
+            }
+        });
+
+    hydrology.soil_moisture = soil_moisture;
+    hydrology.soils = soils;
 }

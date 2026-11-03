@@ -8,7 +8,7 @@ pub mod isostasy;
 pub mod lithology;
 pub mod ocean;
 
-pub use init::{generate_hotspots, generate_plates, generate_plumes, init_tectonics};
+pub use init::{generate_hotspots, generate_plates};
 pub use isostasy::step_elevation_diffusion;
 pub use lithology::finalize_tectonics;
 
@@ -45,14 +45,12 @@ static GEOMETRY_CACHE: OnceLock<Mutex<Option<Arc<TectonicsGeometryCache>>>> = On
 impl TectonicsGeometryCache {
     pub fn get_or_build(topology: &WorldTopology) -> Arc<Self> {
         let mutex = GEOMETRY_CACHE.get_or_init(|| Mutex::new(None));
-        if let Ok(guard) = mutex.lock() {
-            if let Some(cached) = guard.as_ref() {
-                if cached.num_cells == topology.cells.len() {
-                    return Arc::clone(cached);
-                }
-            }
+        if let Ok(guard) = mutex.lock()
+            && let Some(cached) = guard.as_ref()
+            && cached.num_cells == topology.cells.len()
+        {
+            return Arc::clone(cached);
         }
-
         let built = Arc::new(Self::build(topology));
         if let Ok(mut guard) = mutex.lock() {
             *guard = Some(Arc::clone(&built));
@@ -71,7 +69,7 @@ impl TectonicsGeometryCache {
         let mut edge_tangent_dirs = Vec::with_capacity(total_edges);
 
         edge_offsets.push(0);
-        for cell in &topology.cells {
+        for cell in topology.cells.iter() {
             let r_i = cell.center;
             for &n_id in &cell.neighbors {
                 let r_j = topology.cells[n_id].center;
@@ -137,6 +135,51 @@ impl TectonicsScratch {
         self.is_subducting_slab.resize(num_cells, false);
         self.temp_elevations.resize(num_cells, 0.0);
     }
+}
+
+/// Подготавливает граничные поля для продолжения тектонической симуляции.
+/// `project_plates_and_boundaries` обновляет и `scratch`, и переданную геологию;
+/// вызывающая сторона должна передать рабочую копию GeologyLayer, не ECS-ресурс.
+pub fn prepare_tectonics_scratch(
+    topology: &WorldTopology,
+    cache: &TectonicsGeometryCache,
+    geology: &mut GeologyLayer,
+    scratch: &mut TectonicsScratch,
+    config: &TectonicsConfig,
+) -> bool {
+    let num_cells = topology.cells.len();
+    if num_cells == 0 || geology.plates.len() < 3 {
+        return false;
+    }
+
+    // Do not resize mismatched saved data here: that could silently invent
+    // missing crust fields and continue evolution from an inconsistent world.
+    let field_lengths = [
+        geology.plate_ids.len(),
+        geology.elevations.len(),
+        geology.crust_thickness.len(),
+        geology.crust_density.len(),
+        geology.crust_age.len(),
+        geology.sediment_thickness.len(),
+        geology.tectonic_stress.len(),
+        geology.orogeny_root.len(),
+        geology.subcell_shift.len(),
+        geology.is_ocean.len(),
+        geology.continentality.len(),
+        geology.volcano_mask.len(),
+        geology.lithology.len(),
+        geology.terrain_ruggedness.len(),
+    ];
+    if field_lengths.iter().any(|&len| len != num_cells) {
+        return false;
+    }
+
+    scratch.ensure_size(num_cells);
+
+    // This projection updates both scratch and geology. The caller passes a
+    // worker-owned clone of the ECS resource, so mutating it is intentional.
+    boundaries::project_plates_and_boundaries(topology, cache, geology, scratch, config, 0.0);
+    true
 }
 
 /// Однопроходная функция одного периода тектонического движения (без дублирования проходов):
@@ -219,7 +262,14 @@ pub fn step_tectonics_realtime(
     let dt = config.time_step;
     forces::update_plate_velocities(topology, &cache, geology, &scratch, config, dt);
     advection::advect_crust_and_plates(topology, &cache, geology, &mut scratch, config, dt);
-    boundaries::apply_boundary_and_plume_processes(topology, &cache, geology, &mut scratch, config, dt);
+    boundaries::apply_boundary_and_plume_processes(
+        topology,
+        &cache,
+        geology,
+        &mut scratch,
+        config,
+        dt,
+    );
     isostasy::update_isostasy_and_erosion(topology, &cache, geology, &mut scratch, config, dt);
     geology.sim_step = geology.sim_step.wrapping_add(1);
 

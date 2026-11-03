@@ -5,11 +5,8 @@ use bevy_egui::{EguiContext, egui};
 
 use crate::{
     domains::{
-        climate::climate_data::ClimateLayer,
-        generator::GenerationRequest,
-        hydrology::HydrologyLayer,
-        save::SaveUiState,
-        tectonics::GeologyLayer,
+        climate::climate_data::ClimateLayer, generator::GenerationRequest,
+        hydrology::HydrologyLayer, save::SaveUiState, tectonics::GeologyLayer,
     },
     world::{
         WorldConfig,
@@ -35,10 +32,7 @@ pub struct MainMenuState<'w> {
 
 /// В главном меню поверх центрального вьюпорта висит компактное стартовое окно,
 /// а правая/верхняя панели уже полностью доступны для настройки конфигов и загрузки сейвов.
-pub fn main_menu_ui(
-    mut contexts: Query<&mut EguiContext>,
-    mut st: MainMenuState,
-) -> Result {
+pub fn main_menu_ui(mut contexts: Query<&mut EguiContext>, mut st: MainMenuState) -> Result {
     let Ok(mut egui_ctx) = contexts.single_mut() else {
         return Ok(());
     };

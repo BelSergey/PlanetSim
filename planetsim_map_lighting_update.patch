@@ -1,0 +1,904 @@
+diff --git a/src/ui/shell.rs b/src/ui/shell.rs
+index 555f229..c471993 100644
+--- a/src/ui/shell.rs
++++ b/src/ui/shell.rs
+@@ -14,7 +14,8 @@ use crate::{
+     },
+     simulation::clock::SimulationClock,
+     viewport::{
+-        MapCameraAngle, MapOverlay, StarSystemRoot, SunVisualConfig, ViewMode, ViewportViewConfig,
++        MapCameraAngle, MapOverlay, StarSystemRoot, SunVisualConfig, ViewMode,
++        ViewportLightingMode, ViewportViewConfig,
+     },
+     world::{
+         WorldConfig, pipeline::WorldPipeline, start_new_planet, topology::WorldTopology,
+@@ -216,6 +217,38 @@ fn draw_top_panel(ui: &mut egui::Ui, world: &mut World) -> egui::Rect {
+                     }
+                 }
+ 
++                if selected_mode == ViewMode::StarSystem {
++                    world.resource_scope(|_world, mut sun_cfg: Mut<SunVisualConfig>| {
++                        let label = if sun_cfg.visible { "☀ Диск" } else { "◌ Диск скрыт" };
++                        if ui
++                            .selectable_label(sun_cfg.visible, label)
++                            .on_hover_text("Показывать или скрывать только видимый диск Солнца; освещение остаётся включённым")
++                            .clicked()
++                        {
++                            sun_cfg.visible = !sun_cfg.visible;
++                        }
++                    });
++                } else {
++                    let previous_lighting = *world.resource::<ViewportLightingMode>();
++                    let mut selected_lighting = previous_lighting;
++                    ui.separator();
++                    ui.selectable_value(
++                        &mut selected_lighting,
++                        ViewportLightingMode::Solar,
++                        "☀ Солнце",
++                    )
++                    .on_hover_text("Направленный свет: день и ночь меняются по времени и сезонам");
++                    ui.selectable_value(
++                        &mut selected_lighting,
++                        ViewportLightingMode::Global,
++                        "☼ Равномерно",
++                    )
++                    .on_hover_text("Постоянное освещение всей поверхности без ночной стороны");
++                    if selected_lighting != previous_lighting {
++                        *world.resource_mut::<ViewportLightingMode>() = selected_lighting;
++                    }
++                }
++
+                 let subdivs = world.resource::<WorldTopology>().subdivisions;
+                 let seed = world.resource::<WorldConfig>().seed;
+                 let has_geo = !world.resource::<GeologyLayer>().elevations.is_empty();
+@@ -322,10 +355,12 @@ fn draw_left_panel(ui: &mut egui::Ui, world: &mut World) -> egui::Rect {
+                 ui.separator();
+                 ui.label("Модификаторы:");
+ 
+-                world.resource_scope(|_world, mut sun_cfg: Mut<SunVisualConfig>| {
+-                    ui.checkbox(&mut sun_cfg.visible, "Видимый диск Солнца")
+-                        .on_hover_text("Скрывает только сферу Солнца; направленный источник света продолжает работать");
+-                });
++                if *world.resource::<ViewMode>() == ViewMode::StarSystem {
++                    world.resource_scope(|_world, mut sun_cfg: Mut<SunVisualConfig>| {
++                        ui.checkbox(&mut sun_cfg.visible, "Видимый диск Солнца")
++                            .on_hover_text("Скрывает только сферу Солнца; источник света продолжает работать");
++                    });
++                }
+ 
+                 world.resource_scope(|_world, mut view_cfg: Mut<ViewportViewConfig>| {
+                     if ui
+diff --git a/src/viewport/mesh_globe.rs b/src/viewport/mesh_globe.rs
+index 435f627..bb8a36e 100644
+--- a/src/viewport/mesh_globe.rs
++++ b/src/viewport/mesh_globe.rs
+@@ -77,28 +77,216 @@ struct GlobeMeshChunk {
+     indices: Vec<u32>,
+ }
+ 
+-/// Проецирует точку сферы в эквидистантную цилиндрическую карту.
+-/// ref_lon задаёт локальную ветвь долготы, чтобы полигон не пересекал карту по шву.
++/// Возвращает ближайшее представление долготы относительно заданной ветви.
+ #[inline]
+-fn project_map_point(dir: Vec3, ref_lon: f32, radius: f32, height: f32) -> Vec3 {
++fn unwrap_longitude(mut longitude: f32, reference: f32) -> f32 {
++    let half_turn = std::f32::consts::PI;
++    let full_turn = std::f32::consts::TAU;
++    while longitude - reference > half_turn {
++        longitude -= full_turn;
++    }
++    while longitude - reference < -half_turn {
++        longitude += full_turn;
++    }
++    longitude
++}
++
++/// Проецирует точку без ограничения по краям карты. Это используется при
++/// разрезании треугольников на антимеридиане.
++#[inline]
++fn project_map_point_unclamped(dir: Vec3, ref_lon: f32, radius: f32, height: f32) -> Vec3 {
+     let dir = dir.normalize_or_zero();
+     let latitude = dir.y.clamp(-1.0, 1.0).asin();
+-    let mut longitude = dir.x.atan2(dir.z);
+-    if longitude - ref_lon > std::f32::consts::PI {
+-        longitude -= std::f32::consts::TAU;
+-    } else if longitude - ref_lon < -std::f32::consts::PI {
+-        longitude += std::f32::consts::TAU;
+-    }
++    let horizontal_sq = dir.x * dir.x + dir.z * dir.z;
++    let longitude = if horizontal_sq < 1e-8 {
++        ref_lon
++    } else {
++        unwrap_longitude(dir.x.atan2(dir.z), ref_lon)
++    };
+     Vec3::new(longitude * radius, latitude * radius, height)
+ }
+ 
++/// Проецирует географическое ребро стены в диапазон карты. Ребро,
++/// пересекающее антимеридиан, не рисуется как длинная линия через всю карту:
++/// это край карты, а не реальный склон.
+ #[inline]
+-fn cell_reference_longitude(center: Vec3, corners: &[Vec3]) -> f32 {
+-    if center.x * center.x + center.z * center.z > 1e-8 {
+-        center.x.atan2(center.z)
+-    } else {
+-        corners.first().map(|p| p.x.atan2(p.z)).unwrap_or(0.0)
++fn project_map_wall_edge(c1: Vec3, c2: Vec3) -> Option<(Vec2, Vec2)> {
++    use std::f32::consts::{PI, TAU};
++
++    let lon1 = c1.x.atan2(c1.z);
++    let mut lon2 = unwrap_longitude(c2.x.atan2(c2.z), lon1);
++    let mut lon1 = lon1;
++    let midpoint = 0.5 * (lon1 + lon2);
++    let wrap = (midpoint / TAU).round() * TAU;
++    lon1 -= wrap;
++    lon2 -= wrap;
++
++    let tolerance = 1e-5;
++    if lon1 < -PI - tolerance
++        || lon1 > PI + tolerance
++        || lon2 < -PI - tolerance
++        || lon2 > PI + tolerance
++    {
++        return None;
++    }
++
++    let lat1 = c1.y.clamp(-1.0, 1.0).asin();
++    let lat2 = c2.y.clamp(-1.0, 1.0).asin();
++    Some((Vec2::new(lon1, lat1), Vec2::new(lon2, lat2)))
++}
++
++#[inline]
++fn push_map_triangle(output: &mut Vec<Vec3>, a: Vec3, mut b: Vec3, mut c: Vec3, area_epsilon: f32) {
++    // Карта видна со стороны +Z. Единая ориентация треугольников исключает
++    // исчезновение южных/полярных фрагментов из-за back-face culling.
++    let area2 = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
++    if area2 < 0.0 {
++        std::mem::swap(&mut b, &mut c);
++    }
++    if area2.abs() > area_epsilon {
++        output.extend_from_slice(&[a, b, c]);
++    }
++}
++
++/// Отсекает полигон по вертикальной границе карты X=bound.
++fn clip_polygon_x(polygon: Vec<Vec3>, bound: f32, keep_greater: bool) -> Vec<Vec3> {
++    if polygon.is_empty() {
++        return polygon;
++    }
++    let inside = |p: Vec3| if keep_greater { p.x >= bound } else { p.x <= bound };
++    let mut output = Vec::with_capacity(polygon.len() + 1);
++    let mut previous = *polygon.last().unwrap();
++    let mut previous_inside = inside(previous);
++
++    for current in polygon {
++        let current_inside = inside(current);
++        if current_inside != previous_inside {
++            let dx = current.x - previous.x;
++            if dx.abs() > 1e-8 {
++                let t = ((bound - previous.x) / dx).clamp(0.0, 1.0);
++                let mut intersection = previous.lerp(current, t);
++                intersection.x = bound;
++                output.push(intersection);
++            }
++        }
++        if current_inside {
++            output.push(current);
++        }
++        previous = current;
++        previous_inside = current_inside;
++    }
++    output
++}
++
++/// Создаёт top-поверхность одной ячейки в виде обрезанных треугольников.
++/// Треугольники около ±180° дублируются на противоположной кромке, а полярные
++/// вершины получают долготу середины своего ребра (у полюса долгота не определена).
++fn project_cell_top_map_triangles(cell: &crate::world::topology::TopologicalCell, radius: f32, height: f32) -> Vec<Vec3> {
++    use std::f32::consts::{PI, TAU};
++
++    let mut output = Vec::with_capacity(cell.corners.len() * 6);
++    let edge = PI * radius;
++    let polar = cell.center.x * cell.center.x + cell.center.z * cell.center.z < 1e-8;
++
++    // На полюсе все долготы сходятся в одну точку. В равнопрямоугольной
++    // проекции эта точка должна стать верхней/нижней кромкой карты, а не
++    // единственным центральным пиком. Поэтому полярную ячейку строим полосой:
++    // верхняя сторона идёт от -180° до +180°, нижняя повторяет её контур.
++    if polar {
++        let north = cell.center.y >= 0.0;
++        let pole_y = cell.center.y.signum() * 0.5 * PI * radius;
++        let mut ring = cell
++            .corners
++            .iter()
++            .map(|corner| {
++                let direction = corner.normalize_or_zero();
++                (
++                    direction.x.atan2(direction.z),
++                    direction.y.clamp(-1.0, 1.0).asin(),
++                )
++            })
++            .collect::<Vec<_>>();
++        ring.sort_by(|a, b| a.0.total_cmp(&b.0));
++
++        if ring.len() >= 2 {
++            let (left_lon, left_lat) = ring[0];
++            let (right_lon, right_lat) = *ring.last().unwrap();
++            let wrapped_left = left_lon + TAU;
++            let denominator = (wrapped_left - right_lon).abs().max(1e-6);
++            let t = ((PI - right_lon) / denominator).clamp(0.0, 1.0);
++            let seam_lat = right_lat + (left_lat - right_lat) * t;
++
++            let mut boundary = Vec::with_capacity(ring.len() + 2);
++            boundary.push((-PI, seam_lat));
++            boundary.extend(
++                ring.into_iter()
++                    .filter(|(lon, _)| *lon > -PI + 1e-5 && *lon < PI - 1e-5),
++            );
++            boundary.push((PI, seam_lat));
++
++            for pair in boundary.windows(2) {
++                let (lon0, lat0) = pair[0];
++                let (lon1, lat1) = pair[1];
++                let bottom_left = Vec3::new(lon0 * radius, lat0 * radius, height);
++                let bottom_right = Vec3::new(lon1 * radius, lat1 * radius, height);
++                let top_left = Vec3::new(lon0 * radius, pole_y, height);
++                let top_right = Vec3::new(lon1 * radius, pole_y, height);
++                let area_epsilon = radius * radius * 1e-9;
++                if north {
++                    push_map_triangle(&mut output, bottom_left, bottom_right, top_right, area_epsilon);
++                    push_map_triangle(&mut output, bottom_left, top_right, top_left, area_epsilon);
++                } else {
++                    push_map_triangle(&mut output, top_left, top_right, bottom_right, area_epsilon);
++                    push_map_triangle(&mut output, top_left, bottom_right, bottom_left, area_epsilon);
++                }
++            }
++        }
++        return output;
++    }
++
++    for k in 0..cell.corners.len() {
++        let c1 = cell.corners[k];
++        let c2 = cell.corners[(k + 1) % cell.corners.len()];
++        let ref_lon = cell_reference_longitude(cell.center, &cell.corners);
++        let center = project_map_point_unclamped(cell.center, ref_lon, radius, height);
++        let triangle = [
++            center,
++            project_map_point_unclamped(c1, ref_lon, radius, height),
++            project_map_point_unclamped(c2, ref_lon, radius, height),
++        ];
++
++        // Исходный треугольник плюс копия только с той стороны, где он
++        // пересекает антимеридиан. Это сохраняет обе части шва без тройной
++        // обработки каждой обычной ячейки.
++        let min_x = triangle.iter().map(|p| p.x).fold(f32::INFINITY, f32::min);
++        let max_x = triangle.iter().map(|p| p.x).fold(f32::NEG_INFINITY, f32::max);
++        let mut shifts = vec![0.0];
++        if min_x < -edge {
++            shifts.push(TAU);
++        }
++        if max_x > edge {
++            shifts.push(-TAU);
++        }
++
++        for shift in shifts {
++            let shifted = triangle
++                .iter()
++                .map(|p| Vec3::new(p.x + shift * radius, p.y, p.z))
++                .collect::<Vec<_>>();
++            let clipped = clip_polygon_x(shifted, -edge, true);
++            let clipped = clip_polygon_x(clipped, edge, false);
++            if clipped.len() < 3 {
++                continue;
++            }
++            for i in 1..clipped.len() - 1 {
++                let a = clipped[0];
++                let b = clipped[i];
++                let c = clipped[i + 1];
++                push_map_triangle(&mut output, a, b, c, radius * radius * 1e-9);
++            }
++        }
+     }
++    output
+ }
+ 
+ pub fn build_globe_mesh(
+@@ -137,38 +325,42 @@ pub fn build_globe_mesh(
+                 let top_height = render_h * height_scale;
+                 let top_radius = radius + top_height;
+                 let top_normal = cell.center.to_array();
+-                let ref_lon = cell_reference_longitude(cell.center, &cell.corners);
+                 let base_idx = chunk.positions.len() as u32;
+ 
+-                let center_pos = if is_flat_map {
+-                    project_map_point(cell.center, ref_lon, radius, top_height)
++                if is_flat_map {
++                    let top_positions = project_cell_top_map_triangles(cell, radius, top_height);
++                    for position in &top_positions {
++                        chunk.positions.push(position.to_array());
++                        // Сохраняем сферическую нормаль: она содержит широту/долготу
++                        // и нужна для полуденного/ночного терминатора на карте.
++                        chunk.normals.push(top_normal);
++                        chunk.colors.push(top_color);
++                    }
++                    for local in (0..top_positions.len() as u32).step_by(3) {
++                        chunk.indices.extend_from_slice(&[
++                            base_idx + local,
++                            base_idx + local + 1,
++                            base_idx + local + 2,
++                        ]);
++                    }
+                 } else {
+-                    cell.center * top_radius
+-                };
+-                chunk.positions.push(center_pos.to_array());
+-                chunk.normals.push(top_normal);
+-                chunk.colors.push(top_color);
+-
+-                for &corner in &cell.corners {
+-                    let position = if is_flat_map {
+-                        project_map_point(corner, ref_lon, radius, top_height)
+-                    } else {
+-                        corner * top_radius
+-                    };
+-                    chunk.positions.push(position.to_array());
+-                    // Сферическая нормаль сохраняется и на карте: она кодирует
+-                    // географическое положение для динамического солнечного света.
++                    let center_pos = cell.center * top_radius;
++                    chunk.positions.push(center_pos.to_array());
+                     chunk.normals.push(top_normal);
+                     chunk.colors.push(top_color);
+-                }
+-
+-                for k in 0..cell.corners.len() as u32 {
+-                    let next = (k + 1) % cell.corners.len() as u32;
+-                    chunk.indices.extend_from_slice(&[
+-                        base_idx,
+-                        base_idx + 1 + k,
+-                        base_idx + 1 + next,
+-                    ]);
++                    for &corner in &cell.corners {
++                        chunk.positions.push((corner * top_radius).to_array());
++                        chunk.normals.push(top_normal);
++                        chunk.colors.push(top_color);
++                    }
++                    for k in 0..cell.corners.len() as u32 {
++                        let next = (k + 1) % cell.corners.len() as u32;
++                        chunk.indices.extend_from_slice(&[
++                            base_idx,
++                            base_idx + 1 + k,
++                            base_idx + 1 + next,
++                        ]);
++                    }
+                 }
+ 
+                 let wall_color = [
+@@ -201,11 +393,14 @@ pub fn build_globe_mesh(
+                     let c1 = cell.corners[k];
+                     let c2 = cell.corners[(k + 1) % cell.corners.len()];
+                     let (top_left, top_right, bottom_left, bottom_right) = if is_flat_map {
++                        let Some((edge_left, edge_right)) = project_map_wall_edge(c1, c2) else {
++                            continue;
++                        };
+                         (
+-                            project_map_point(c1, ref_lon, radius, top_height),
+-                            project_map_point(c2, ref_lon, radius, top_height),
+-                            project_map_point(c1, ref_lon, radius, bottom_height),
+-                            project_map_point(c2, ref_lon, radius, bottom_height),
++                            Vec3::new(edge_left.x * radius, edge_left.y * radius, top_height),
++                            Vec3::new(edge_right.x * radius, edge_right.y * radius, top_height),
++                            Vec3::new(edge_left.x * radius, edge_left.y * radius, bottom_height),
++                            Vec3::new(edge_right.x * radius, edge_right.y * radius, bottom_height),
+                         )
+                     } else {
+                         (
+@@ -269,11 +464,17 @@ pub fn build_globe_mesh(
+ pub struct MeshColorLayout {
+     pub offsets: Vec<usize>,
+     pub wall_masks: Vec<u32>,
++    pub top_vertex_counts: Vec<usize>,
+ }
+ 
+-pub fn compute_color_layout(topology: &WorldTopology, elevations: &[f32]) -> MeshColorLayout {
++pub fn compute_color_layout(
++    topology: &WorldTopology,
++    elevations: &[f32],
++    is_flat_map: bool,
++) -> MeshColorLayout {
+     let mut offsets = Vec::with_capacity(topology.cells.len() + 1);
+     let mut wall_masks = Vec::with_capacity(topology.cells.len());
++    let mut top_vertex_counts = Vec::with_capacity(topology.cells.len());
+     offsets.push(0);
+     let mut total = 0usize;
+ 
+@@ -282,10 +483,19 @@ pub fn compute_color_layout(topology: &WorldTopology, elevations: &[f32]) -> Mes
+         let mut mask = 0u32;
+         let mut wall_count = 0usize;
+         for (k, neighbor_id) in cell.neighbors.iter().enumerate() {
+-            if elevations
+-                .get(*neighbor_id)
+-                .is_some_and(|&neighbor_h| height > neighbor_h)
+-            {
++            let Some(&neighbor_h) = elevations.get(*neighbor_id) else {
++                continue;
++            };
++            if height <= neighbor_h {
++                continue;
++            }
++            let wall_is_visible = !is_flat_map
++                || project_map_wall_edge(
++                    cell.corners[k],
++                    cell.corners[(k + 1) % cell.corners.len()],
++                )
++                .is_some();
++            if wall_is_visible {
+                 wall_count += 1;
+                 if k < u32::BITS as usize {
+                     mask |= 1u32 << k;
+@@ -293,12 +503,19 @@ pub fn compute_color_layout(topology: &WorldTopology, elevations: &[f32]) -> Mes
+             }
+         }
+         wall_masks.push(mask);
+-        total += 1 + cell.corners.len() + wall_count * 4;
++        let top_vertices = if is_flat_map {
++            project_cell_top_map_triangles(cell, 1.0, 0.0).len()
++        } else {
++            1 + cell.corners.len()
++        };
++        top_vertex_counts.push(top_vertices);
++        total += top_vertices + wall_count * 4;
+         offsets.push(total);
+     }
+     MeshColorLayout {
+         offsets,
+         wall_masks,
++        top_vertex_counts,
+     }
+ }
+ 
+@@ -353,7 +570,7 @@ pub fn recolor_globe_mesh_range(
+                 let len = layout.offsets[cell_id + 1] - layout.offsets[cell_id];
+                 let cell_colors_out = &mut chunk_colors[local_start..local_start + len];
+                 let top_color = cell_colors.get(cell_id).copied().unwrap_or([1.0; 4]);
+-                let top_vertices = 1 + cell.corners.len();
++                let top_vertices = layout.top_vertex_counts[cell_id];
+                 if top_vertices > cell_colors_out.len() {
+                     continue;
+                 }
+@@ -410,22 +627,17 @@ pub fn reposition_globe_mesh(
+                 };
+                 let top_height = render_h * height_scale;
+                 let top_radius = radius + top_height;
+-                let ref_lon = cell_reference_longitude(cell.center, &cell.corners);
+-
+-                let center = if is_flat_map {
+-                    project_map_point(cell.center, ref_lon, radius, top_height)
++                if is_flat_map {
++                    out.extend(
++                        project_cell_top_map_triangles(cell, radius, top_height)
++                            .into_iter()
++                            .map(|position| position.to_array()),
++                    );
+                 } else {
+-                    cell.center * top_radius
+-                };
+-                out.push(center.to_array());
+-
+-                for &corner in &cell.corners {
+-                    let position = if is_flat_map {
+-                        project_map_point(corner, ref_lon, radius, top_height)
+-                    } else {
+-                        corner * top_radius
+-                    };
+-                    out.push(position.to_array());
++                    out.push((cell.center * top_radius).to_array());
++                    for &corner in &cell.corners {
++                        out.push((corner * top_radius).to_array());
++                    }
+                 }
+ 
+                 for k in 0..cell.corners.len() {
+@@ -454,11 +666,14 @@ pub fn reposition_globe_mesh(
+                     let c1 = cell.corners[k];
+                     let c2 = cell.corners[(k + 1) % cell.corners.len()];
+                     if is_flat_map {
++                        let Some((edge_left, edge_right)) = project_map_wall_edge(c1, c2) else {
++                            continue;
++                        };
+                         out.extend_from_slice(&[
+-                            project_map_point(c1, ref_lon, radius, top_height).to_array(),
+-                            project_map_point(c2, ref_lon, radius, top_height).to_array(),
+-                            project_map_point(c1, ref_lon, radius, bottom_height).to_array(),
+-                            project_map_point(c2, ref_lon, radius, bottom_height).to_array(),
++                            [edge_left.x * radius, edge_left.y * radius, top_height],
++                            [edge_right.x * radius, edge_right.y * radius, top_height],
++                            [edge_left.x * radius, edge_left.y * radius, bottom_height],
++                            [edge_right.x * radius, edge_right.y * radius, bottom_height],
+                         ]);
+                     } else {
+                         out.extend_from_slice(&[
+@@ -480,8 +695,58 @@ pub fn reposition_globe_mesh(
+     positions
+ }
+ 
+-/// Проецирует речные треугольники в карту по отдельности: каждый треугольник
+-/// получает непрерывную ветвь долготы, поэтому сегменты у ±180° не рвутся.
++#[derive(Clone, Copy)]
++struct ProjectedRiverVertex {
++    position: Vec3,
++    normal: Vec3,
++    color: Vec4,
++}
++
++impl ProjectedRiverVertex {
++    fn lerp(self, other: Self, t: f32) -> Self {
++        Self {
++            position: self.position.lerp(other.position, t),
++            normal: self.normal.lerp(other.normal, t).normalize_or_zero(),
++            color: self.color.lerp(other.color, t),
++        }
++    }
++}
++
++fn clip_river_polygon_x(
++    polygon: Vec<ProjectedRiverVertex>,
++    bound: f32,
++    keep_greater: bool,
++) -> Vec<ProjectedRiverVertex> {
++    if polygon.is_empty() {
++        return polygon;
++    }
++    let inside = |p: ProjectedRiverVertex| {
++        if keep_greater { p.position.x >= bound } else { p.position.x <= bound }
++    };
++    let mut output = Vec::with_capacity(polygon.len() + 1);
++    let mut previous = *polygon.last().unwrap();
++    let mut previous_inside = inside(previous);
++    for current in polygon {
++        let current_inside = inside(current);
++        if current_inside != previous_inside {
++            let dx = current.position.x - previous.position.x;
++            if dx.abs() > 1e-8 {
++                let t = ((bound - previous.position.x) / dx).clamp(0.0, 1.0);
++                let mut intersection = previous.lerp(current, t);
++                intersection.position.x = bound;
++                output.push(intersection);
++            }
++        }
++        if current_inside {
++            output.push(current);
++        }
++        previous = current;
++        previous_inside = current_inside;
++    }
++    output
++}
++
++/// Проецирует речные треугольники и разрезает их по границе карты ±180°.
+ pub fn project_river_mesh_to_map3d(mesh: &mut Mesh, radius: f32) {
+     let source_positions = match mesh.attribute(Mesh::ATTRIBUTE_POSITION) {
+         Some(VertexAttributeValues::Float32x3(values)) => values.clone(),
+@@ -512,37 +777,83 @@ pub fn project_river_mesh_to_map3d(mesh: &mut Mesh, radius: f32) {
+     let mut colors = Vec::with_capacity(source_indices.len());
+     let mut indices = Vec::with_capacity(source_indices.len());
+ 
++    let edge = std::f32::consts::PI * radius;
+     for triangle in source_indices.chunks_exact(3) {
+-        let Some(&first) = source_positions.get(triangle[0] as usize) else {
+-            continue;
+-        };
+-        let first_point = Vec3::from_array(first);
+-        let reference_lon = first_point
+-            .normalize_or_zero()
+-            .x
+-            .atan2(first_point.normalize_or_zero().z);
+-        let base = positions.len() as u32;
++        let reference_lon = triangle
++            .iter()
++            .filter_map(|&source_index| source_positions.get(source_index as usize))
++            .map(|raw| Vec3::from_array(*raw).normalize_or_zero())
++            .find(|direction| direction.x * direction.x + direction.z * direction.z >= 1e-8)
++            .map(|direction| direction.x.atan2(direction.z))
++            .unwrap_or(0.0);
++        let mut projected = Vec::with_capacity(3);
+ 
+         for &source_index in triangle {
+             let index = source_index as usize;
+             let Some(&raw) = source_positions.get(index) else {
+-                continue;
++                projected.clear();
++                break;
+             };
+             let point = Vec3::from_array(raw);
+             let direction = point.normalize_or_zero();
+             let height = point.length() - radius;
+-            let projected = project_map_point(direction, reference_lon, radius, height);
+-            positions.push(projected.to_array());
+-            normals.push(
+-                source_normals
+-                    .get(index)
+-                    .copied()
+-                    .unwrap_or([0.0, 0.0, 1.0]),
+-            );
+-            colors.push(source_colors.get(index).copied().unwrap_or([1.0; 4]));
++            let source_normal = source_normals.get(index).copied().unwrap_or([0.0, 0.0, 1.0]);
++            let source_color = source_colors.get(index).copied().unwrap_or([1.0; 4]);
++            projected.push(ProjectedRiverVertex {
++                position: project_map_point_unclamped(direction, reference_lon, radius, height),
++                normal: Vec3::from_array(source_normal),
++                color: Vec4::from_array(source_color),
++            });
++        }
++        if projected.len() != 3 {
++            continue;
+         }
+-        if positions.len() == base as usize + 3 {
+-            indices.extend_from_slice(&[base, base + 1, base + 2]);
++
++        let min_x = projected.iter().map(|p| p.position.x).fold(f32::INFINITY, f32::min);
++        let max_x = projected.iter().map(|p| p.position.x).fold(f32::NEG_INFINITY, f32::max);
++        let mut shifts = vec![0.0];
++        if min_x < -edge {
++            shifts.push(std::f32::consts::TAU);
++        }
++        if max_x > edge {
++            shifts.push(-std::f32::consts::TAU);
++        }
++
++        for shift in shifts {
++            let shifted = projected
++                .iter()
++                .copied()
++                .map(|mut vertex| {
++                    vertex.position.x += shift * radius;
++                    vertex
++                })
++                .collect::<Vec<_>>();
++            let clipped = clip_river_polygon_x(shifted, -edge, true);
++            let clipped = clip_river_polygon_x(clipped, edge, false);
++            if clipped.len() < 3 {
++                continue;
++            }
++            for i in 1..clipped.len() - 1 {
++                let triangle_vertices = [clipped[0], clipped[i], clipped[i + 1]];
++                let a = triangle_vertices[0].position;
++                let b = triangle_vertices[1].position;
++                let c = triangle_vertices[2].position;
++                let area2 = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
++                if area2.abs() <= radius * radius * 1e-9 {
++                    continue;
++                }
++                let mut triangle_vertices = triangle_vertices;
++                if area2 < 0.0 {
++                    triangle_vertices.swap(1, 2);
++                }
++                let base = positions.len() as u32;
++                for vertex in triangle_vertices {
++                    positions.push(vertex.position.to_array());
++                    normals.push(vertex.normal.to_array());
++                    colors.push(vertex.color.to_array());
++                }
++                indices.extend_from_slice(&[base, base + 1, base + 2]);
++            }
+         }
+     }
+ 
+diff --git a/src/viewport/mod.rs b/src/viewport/mod.rs
+index 44c3ce3..12b4291 100644
+--- a/src/viewport/mod.rs
++++ b/src/viewport/mod.rs
+@@ -83,6 +83,20 @@ pub enum MapCameraAngle {
+     Isometric,
+ }
+ 
++/// Способ освещения в режимах отдельного глобуса и 3D-карты.
++#[derive(Resource, Default, PartialEq, Eq, Clone, Copy, Debug)]
++pub enum ViewportLightingMode {
++    /// Направленный источник света вращается по суточному циклу и сезонам.
++    #[default]
++    Solar,
++    /// Равномерный свет по всей поверхности без дневной/ночной стороны.
++    Global,
++}
++
++/// Подложка прямоугольной карты, закрывающая пустые участки у полюсов и шва.
++#[derive(Component)]
++pub struct MapBackground;
++
+ #[derive(Resource, Default, PartialEq, Eq, Clone, Copy)]
+ pub enum MapOverlay {
+     #[default]
+@@ -160,9 +174,7 @@ struct ViewportMeshCache {
+     last_space_colors_u8: Option<Vec<[u8; 4]>>,
+ }
+ 
+-/// Local state for `sync_viewport_mesh` is grouped into one system parameter.
+-/// Bevy 0.19 supports a finite number of direct system parameters; keeping the
+-/// three local caches together avoids exceeding that limit.
++/// Группирует локальные кэши mesh-системы, чтобы не превышать лимит параметров Bevy.
+ #[derive(Default)]
+ struct ViewportMeshLocalState {
+     deferred_mesh_drops: Vec<Handle<Mesh>>,
+@@ -176,6 +188,7 @@ impl Plugin for ViewportPlugin {
+     fn build(&self, app: &mut App) {
+         app.init_resource::<ViewMode>()
+             .init_resource::<MapCameraAngle>()
++            .init_resource::<ViewportLightingMode>()
+             .init_resource::<MapOverlay>()
+             .init_resource::<ViewportViewConfig>()
+             .init_resource::<SunVisualConfig>()
+@@ -195,6 +208,10 @@ impl Plugin for ViewportPlugin {
+                     .in_set(PipelineSet::Input),
+             )
+             .add_systems(Update, sync_viewport_mesh.in_set(PipelineSet::Render))
++            .add_systems(
++                Update,
++                (sync_map_background, sync_viewport_lighting).in_set(PipelineSet::Render),
++            )
+             .add_systems(
+                 Update,
+                 draw_axis_and_equator_gizmos.in_set(PipelineSet::Render),
+@@ -204,6 +221,7 @@ impl Plugin for ViewportPlugin {
+ 
+ fn setup_scene(
+     mut commands: Commands,
++    world_config: Res<WorldConfig>,
+     mut meshes: ResMut<Assets<Mesh>>,
+     mut materials: ResMut<Assets<StandardMaterial>>,
+ ) {
+@@ -224,6 +242,13 @@ fn setup_scene(
+         metallic: 0.05,
+         ..default()
+     });
++    let map_background_material = materials.add(StandardMaterial {
++        base_color: Color::srgb(0.34, 0.49, 0.62),
++        perceptual_roughness: 1.0,
++        unlit: true,
++        ..default()
++    });
++    let map_background_mesh = meshes.add(Rectangle::new(1.0, 1.0));
+ 
+     let sun_mesh = meshes.add(Sphere::new(1.0).mesh().uv(48, 32));
+     let root = commands
+@@ -253,6 +278,23 @@ fn setup_scene(
+                 Visibility::Inherited,
+             ))
+             .with_children(|planet| {
++                let map_radius = world_config.radius;
++                planet.spawn((
++                    Mesh3d(map_background_mesh.clone()),
++                    MeshMaterial3d(map_background_material.clone()),
++                    MapBackground,
++                    Transform {
++                        translation: Vec3::new(0.0, 0.0, -map_radius * 0.03),
++                        scale: Vec3::new(
++                            std::f32::consts::TAU * map_radius,
++                            std::f32::consts::PI * map_radius,
++                            1.0,
++                        ),
++                        ..default()
++                    },
++                    Visibility::Hidden,
++                ));
++
+                 planet
+                     .spawn((
+                         Mesh3d::default(),
+@@ -279,12 +321,90 @@ fn setup_scene(
+             },
+             Sunlight,
+             Transform::from_xyz(10.0, 10.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y),
++            Visibility::Inherited,
+         ));
+     });
+ 
+     commands.spawn((Camera3d::default(), Transform::from_xyz(0.0, 0.0, 9.5)));
+ }
+ 
++/// Подгоняет подложку карты под актуальный радиус и высотный диапазон.
++fn sync_map_background(
++    view_mode: Res<ViewMode>,
++    world_config: Res<WorldConfig>,
++    geology: Res<GeologyLayer>,
++    mut background_query: Query<(&mut Transform, &mut Visibility), With<MapBackground>>,
++) {
++    if !view_mode.is_changed() && !world_config.is_changed() && !geology.is_changed() {
++        return;
++    }
++
++    let should_show = *view_mode == ViewMode::Map3D;
++    let min_elevation = geology.elevations.iter().copied().fold(0.0_f32, f32::min);
++    let radius = world_config.radius.max(0.01);
++    let background_z = min_elevation * world_config.height_scale() - radius * 0.025;
++    let target_visibility = if should_show {
++        Visibility::Inherited
++    } else {
++        Visibility::Hidden
++    };
++
++    for (mut transform, mut visibility) in &mut background_query {
++        let target_scale = Vec3::new(
++            std::f32::consts::TAU * radius,
++            std::f32::consts::PI * radius,
++            1.0,
++        );
++        if transform.scale.distance_squared(target_scale) > 1e-8 {
++            transform.scale = target_scale;
++        }
++        if (transform.translation.z - background_z).abs() > 1e-5 {
++            transform.translation.z = background_z;
++        }
++        if *visibility != target_visibility {
++            *visibility = target_visibility;
++        }
++    }
++}
++
++/// Переключает направленное Солнце и равномерное глобальное освещение.
++fn sync_viewport_lighting(
++    view_mode: Res<ViewMode>,
++    lighting_mode: Res<ViewportLightingMode>,
++    mut ambient: ResMut<GlobalAmbientLight>,
++    mut sunlight_query: Query<&mut Visibility, With<Sunlight>>,
++    mut default_ambient: Local<Option<(Color, f32)>>,
++) {
++    let baseline = default_ambient
++        .get_or_insert((ambient.color, ambient.brightness))
++        .to_owned();
++    let use_global = *view_mode != ViewMode::StarSystem
++        && *lighting_mode == ViewportLightingMode::Global;
++
++    let (target_color, target_brightness) = if use_global {
++        (Color::WHITE, 550.0)
++    } else {
++        baseline
++    };
++    if ambient.color != target_color {
++        ambient.color = target_color;
++    }
++    if (ambient.brightness - target_brightness).abs() > 1e-3 {
++        ambient.brightness = target_brightness;
++    }
++
++    let target_visibility = if use_global {
++        Visibility::Hidden
++    } else {
++        Visibility::Inherited
++    };
++    for mut visibility in &mut sunlight_query {
++        if *visibility != target_visibility {
++            *visibility = target_visibility;
++        }
++    }
++}
++
+ #[allow(clippy::too_many_arguments)]
+ fn sync_viewport_mesh(
+     mut pipeline: ResMut<WorldPipeline>,
+@@ -307,7 +427,6 @@ fn sync_viewport_mesh(
+     mut meshes: ResMut<Assets<Mesh>>,
+     mut local_state: Local<ViewportMeshLocalState>,
+ ) {
+-    let local_state = &mut *local_state;
+     local_state.deferred_mesh_drops.clear();
+ 
+     if local_state.last_view_mode != Some(*view_mode) {
+@@ -358,8 +477,7 @@ fn sync_viewport_mesh(
+             );
+             local_state.deferred_mesh_drops.push(mesh_handle.0.clone());
+             mesh_handle.0 = meshes.add(mesh);
+-            local_state.cache.color_layout =
+-                Some(compute_color_layout(&topology, &geology.elevations));
++            local_state.cache.color_layout = Some(compute_color_layout(&topology, &geology.elevations, is_flat_map));
+             local_state.cache.last_space_colors_u8 = if *overlay == MapOverlay::SpaceView {
+                 Some(quantize_colors(&colors))
+             } else {
+@@ -430,7 +548,7 @@ fn sync_viewport_mesh(
+                     if let Some((colors, dirty)) = colors_update {
+                         if local_state.cache.color_layout.is_none() {
+                             local_state.cache.color_layout =
+-                                Some(compute_color_layout(&topology, &geology.elevations));
++                                Some(compute_color_layout(&topology, &geology.elevations, is_flat_map));
+                         }
+ 
+                         if let Some(layout) = local_state.cache.color_layout.as_ref() {

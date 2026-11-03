@@ -6,11 +6,11 @@ pub mod hydrology_palettes;
 pub mod hydrology_ui;
 mod solver;
 
+use crate::world::{pipeline::PipelineSet, states::AppState};
 pub use hydrology_config::HydrologyConfig;
 pub use hydrology_data::HydrologyLayer;
-pub use solver::{apply_surface_feedback_to_climate, simulate_hydrology};
-use crate::world::{pipeline::PipelineSet, states::AppState};
 use hydrology_palettes::draw_river_flow_gizmos;
+pub use solver::{apply_surface_feedback_to_climate, simulate_hydrology};
 
 use bevy::prelude::*;
 

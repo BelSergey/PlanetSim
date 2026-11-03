@@ -52,7 +52,13 @@ pub fn draw_civilization_tab_system(
             .add_enabled(!config.is_running, egui::Button::new("⏭ +1 шаг"))
             .clicked()
         {
-            step_civilization_simulation(&geology, &hydrology, &mut civ, &config, world_config.seed);
+            step_civilization_simulation(
+                &geology,
+                &hydrology,
+                &mut civ,
+                &config,
+                world_config.seed,
+            );
             pipeline.recolor_mesh = true;
         }
 
@@ -91,9 +97,7 @@ pub fn draw_civilization_tab_system(
     });
 
     ui.add_space(4.0);
-    ui.add(
-        egui::Slider::new(&mut config.steps_per_frame, 1..=15).text("Шагов за кадр (Скорость)"),
-    );
+    ui.add(egui::Slider::new(&mut config.steps_per_frame, 1..=15).text("Шагов за кадр (Скорость)"));
     ui.weak(format!("Эпоха (Тик): {}", civ.tick));
 
     ui.separator();
@@ -151,12 +155,10 @@ pub fn draw_civilization_tab_system(
     ui.add(egui::Slider::new(&mut spec.spatial_diffusion, 0.05..=1.0).text("Экспансия на соседей"));
     ui.add(egui::Slider::new(&mut spec.distance_decay, 0.0..=0.80).text("Штраф размера (Распад)"));
     ui.add(
-        egui::Slider::new(&mut spec.fracture_threshold, 0.20..=1.20)
-            .text("Порог войны / раскола"),
+        egui::Slider::new(&mut spec.fracture_threshold, 0.20..=1.20).text("Порог войны / раскола"),
     );
     ui.add(
-        egui::Slider::new(&mut spec.emergence_threshold, 0.10..=0.90)
-            .text("Порог авторождения"),
+        egui::Slider::new(&mut spec.emergence_threshold, 0.10..=0.90).text("Порог авторождения"),
     );
 
     ui.add_space(6.0);
@@ -175,7 +177,6 @@ pub fn draw_civilization_tab_system(
             .text("Просачивание через границу"),
     );
     ui.add(
-        egui::Slider::new(&mut spec.conquest_loot_chance, 0.0..=1.0)
-            .text("Захват идей в войне"),
+        egui::Slider::new(&mut spec.conquest_loot_chance, 0.0..=1.0).text("Захват идей в войне"),
     );
 }

@@ -1,6 +1,9 @@
 // src/domains/tectonics/tectonics_ui.rs
 
-use super::tectonics_config::TectonicsConfig;
+use super::{
+    tectonics_config::TectonicsConfig,
+    tectonics_evolution::{TectonicEvolutionConfig, TectonicEvolutionState},
+};
 use crate::{domains::generator::GenerationRequest, world::pipeline::PipelineStage};
 use bevy::prelude::*;
 use bevy_egui::egui;
@@ -8,6 +11,8 @@ use bevy_egui::egui;
 pub fn draw_tectonics_tab_system(
     InMut(ui): InMut<'_, egui::Ui>,
     mut config: ResMut<TectonicsConfig>,
+    mut evolution: ResMut<TectonicEvolutionConfig>,
+    evolution_state: Res<TectonicEvolutionState>,
     mut gen_req: ResMut<GenerationRequest>,
 ) {
     ui.heading("Настройки Тектоники");
@@ -40,11 +45,15 @@ pub fn draw_tectonics_tab_system(
 
     ui.separator();
     ui.label("2. Симуляция движения и силы:");
+    ui.add(egui::Slider::new(&mut config.simulation_steps, 5..=120).text("Шагов движения плит"));
     ui.add(
-        egui::Slider::new(&mut config.simulation_steps, 5..=120).text("Шагов движения плит"),
+        egui::Slider::new(&mut config.slab_pull_strength, 0.0..=6.0)
+            .text("Тяга субдукции (Slab pull)"),
     );
-    ui.add(egui::Slider::new(&mut config.slab_pull_strength, 0.0..=6.0).text("Тяга субдукции (Slab pull)"));
-    ui.add(egui::Slider::new(&mut config.ridge_push_strength, 0.0..=4.0).text("Толчок хребтов (Ridge push)"));
+    ui.add(
+        egui::Slider::new(&mut config.ridge_push_strength, 0.0..=4.0)
+            .text("Толчок хребтов (Ridge push)"),
+    );
     ui.add(
         egui::Slider::new(&mut config.collision_resistance_strength, 0.5..=8.0)
             .text("Сопротивление коллизии"),
@@ -52,8 +61,23 @@ pub fn draw_tectonics_tab_system(
     ui.add(egui::Slider::new(&mut config.hotspot_count, 0..=40).text("Кол-во плюмов"));
 
     ui.separator();
+    ui.label("Эволюция тектоники во времени:");
+    ui.checkbox(&mut evolution.enabled, "Автоматически развивать плиты");
+    ui.add(
+        egui::Slider::new(&mut evolution.epoch_real_seconds, 30.0..=3600.0)
+            .logarithmic(true)
+            .text("Секунд между эпохами"),
+    );
+    ui.add(
+        egui::Slider::new(&mut evolution.steps_per_epoch, 1..=8).text("Физических шагов за эпоху"),
+    );
+    ui.weak(format!("Запрошено эпох: {}", evolution_state.epochs));
+
+    ui.separator();
     ui.label("3. Изостазия и океаны:");
-    ui.add(egui::Slider::new(&mut config.cont_base_height, 0.02..=0.35).text("Базовая высота суши"));
+    ui.add(
+        egui::Slider::new(&mut config.cont_base_height, 0.02..=0.35).text("Базовая высота суши"),
+    );
     ui.add(egui::Slider::new(&mut config.ocean_base_height, -0.65..=-0.15).text("Глубина океана"));
     ui.add(
         egui::Slider::new(&mut config.min_ocean_size_ratio, 0.002..=0.06)
@@ -67,9 +91,11 @@ pub fn draw_tectonics_tab_system(
     ui.separator();
     ui.label("4. Шум и детализация:");
     ui.add(egui::Slider::new(&mut config.warp_strength, 0.0..=1.0).text("Сила искажения границ"));
-    ui.add(egui::Slider::new(&mut config.boundary_noise_amp, 0.0..=1.5).text("Амплитуда горного шума"));
     ui.add(
-        egui::Slider::new(&mut config.detail_noise_amp, 0.0..=0.5)
+        egui::Slider::new(&mut config.boundary_noise_amp, 0.0..=1.5).text("Амплитуда горного шума"),
+    );
+    ui.add(
+        egui::Slider::new(&mut config.detail_noise_amp, 0.0..=2.0)
             .text("Мелкий шум (шероховатость)"),
     );
 }
