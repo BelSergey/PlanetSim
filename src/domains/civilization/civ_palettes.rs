@@ -1,6 +1,6 @@
 // src/domains/civilization/civ_palettes.rs
-use rayon::prelude::*;
 use bevy::color::{Color, ColorToComponents};
+use rayon::prelude::*;
 
 use super::{
     civ_config::CivilizationConfig,

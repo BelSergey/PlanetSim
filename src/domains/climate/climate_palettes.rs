@@ -1,6 +1,6 @@
 // src/domains/climate/climate_palettes.rs
-use rayon::prelude::*;
 use bevy::prelude::*;
+use rayon::prelude::*;
 
 use super::climate_data::ClimateLayer;
 use crate::{
@@ -144,9 +144,9 @@ pub fn build_pressure_colors(climate: &ClimateLayer) -> Vec<[f32; 4]> {
 pub fn build_wind_colors(climate: &ClimateLayer) -> Vec<[f32; 4]> {
     let max_speed = climate
         .winds
-        .par_iter() 
+        .par_iter()
         .map(|w| w.length())
-        .reduce(|| 0.0001_f32, |a, b| a.max(b)); 
+        .reduce(|| 0.0001_f32, |a, b| a.max(b));
 
     climate
         .winds

@@ -79,12 +79,12 @@ fn update_dynamic_seasonal_climate(
     }
 
     *interpolate_cooldown += time.delta_secs();
-    
+
     // Жёсткий лимит: не чаще 4 раз в секунду
     if *interpolate_cooldown < 1.0 {
         return;
     }
-    
+
     // Обновляем, только если сезон сдвинулся существенно (на 2%)
     if (season_state.season_factor - *last_factor).abs() < 0.1 {
         *interpolate_cooldown = 0.0;

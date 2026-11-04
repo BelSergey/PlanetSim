@@ -467,7 +467,7 @@ fn sync_viewport_mesh(
             // --- ПОЛНАЯ ПЕРЕСБОРКА МЕША ---
             let colors =
                 compute_overlay_colors(&overlay, &geology, &climate, &hydrology, &civ, &civ_config);
-            
+
             let mesh = build_globe_mesh(
                 &topology,
                 &geology.elevations,
@@ -480,13 +480,13 @@ fn sync_viewport_mesh(
             );
             local_state.deferred_mesh_drops.push(mesh_handle.0.clone());
             mesh_handle.0 = meshes.add(mesh);
-            
+
             local_state.cache.color_layout = Some(compute_color_layout(
                 &topology,
                 &geology.elevations,
                 is_flat_map,
             ));
-            
+
             // Кэшируем цвета при полной пересборке для любого слоя
             local_state.cache.last_colors_u8 = Some(quantize_colors(&colors));
             mesh_updated = true;
@@ -507,7 +507,7 @@ fn sync_viewport_mesh(
 
                 // Квантуем цвета в u8 (0..255), чтобы отсечь микроскопические изменения float
                 let current = quantize_colors(&colors);
-                
+
                 let dirty = local_state
                     .cache
                     .last_colors_u8
@@ -521,7 +521,7 @@ fn sync_viewport_mesh(
                                 .collect::<Vec<_>>()
                         })
                     });
-                    
+
                 let any_dirty = dirty
                     .as_ref()
                     .is_none_or(|mask| mask.iter().any(|&changed| changed));
@@ -568,7 +568,7 @@ fn sync_viewport_mesh(
                                 topology.cells.len(),
                                 dirty.as_deref(),
                             );
-                            
+
                             // Обновляем кэш новыми цветами
                             local_state.cache.last_colors_u8 = new_colors_cache;
                             mesh_updated = true;

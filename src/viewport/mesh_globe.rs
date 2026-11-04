@@ -14,6 +14,8 @@ use crate::domains::{
     tectonics::tectonics_data::GeologyLayer,
 };
 
+const WALL_THRESHOLD: f32 = 0.005;
+
 /// Промежуточный буфер для параллельной сборки речного меша.
 #[derive(Default)]
 struct RiverMeshChunk {
@@ -411,8 +413,9 @@ pub fn build_globe_mesh(
                     else {
                         continue;
                     };
-            const WALL_THRESHOLD: f32 = 0.015;
-            if real_h <= neighbor_h + WALL_THRESHOLD { continue; }
+                    if real_h <= neighbor_h + WALL_THRESHOLD {
+                        continue;
+                    }
                     let neighbor_id = cell.neighbors[k];
                     let neighbor_ocean = is_ocean
                         .get(neighbor_id)
@@ -521,8 +524,9 @@ pub fn compute_color_layout(
             let Some(&neighbor_h) = elevations.get(*neighbor_id) else {
                 continue;
             };
-            const WALL_THRESHOLD: f32 = 0.015;
-            if height <= neighbor_h + WALL_THRESHOLD { continue; }
+            if height <= neighbor_h + WALL_THRESHOLD {
+                continue;
+            }
             let wall_is_visible = !is_flat_map
                 || project_map_wall_edge(
                     cell.corners[k],
@@ -682,8 +686,9 @@ pub fn reposition_globe_mesh(
                     else {
                         continue;
                     };
-            const WALL_THRESHOLD: f32 = 0.015;
-            if real_h <= neighbor_h + WALL_THRESHOLD { continue; }
+                    if real_h <= neighbor_h + WALL_THRESHOLD {
+                        continue;
+                    }
                     let neighbor_id = cell.neighbors[k];
                     let neighbor_ocean = is_ocean
                         .get(neighbor_id)

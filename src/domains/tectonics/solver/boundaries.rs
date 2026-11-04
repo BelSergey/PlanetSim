@@ -309,7 +309,8 @@ pub fn project_plates_and_boundaries(
 
     if dt == 0.0
         || geology.sim_step.is_multiple_of(4)
-        || geology.sim_step as usize + 1 >= config.simulation_steps {
+        || geology.sim_step as usize + 1 >= config.simulation_steps
+    {
         update_crust_age_and_density_fast(topology, cache, geology, &is_spreading_ridge, config);
     } else {
         update_crust_age_fast(geology, &is_spreading_ridge, dt, config);

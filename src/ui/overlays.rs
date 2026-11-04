@@ -250,7 +250,7 @@ pub struct LegendState {
 
 impl Default for LegendState {
     fn default() -> Self {
-        Self { open: true }
+        Self { open: false }
     }
 }
 
