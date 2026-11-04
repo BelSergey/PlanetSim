@@ -149,10 +149,47 @@ pub fn update_plate_velocities(
         }
     }
 
-    // 4. Интеграция угловой скорости — как в старом коде (без изменений)
+    // 4. Интеграция угловой скорости с разделением движущих и тормозящих моментов
     for (p_id, plate) in geology.plates.iter_mut().enumerate() {
-        // TODO: интеграция угловой скорости
-        let _ = (p_id, plate);
+        let inertia = plate_areas[p_id].max(0.04);
+        let drive_alpha = plate_driving_torques[p_id] / inertia;
+        let resist_alpha = plate_resist_torques[p_id] / inertia;
+
+        // 1. Применяем тягу слэбов, толчок хребтов и импульсы плюмов
+        let omega_driven = plate.omega + drive_alpha * (dt * 2.5);
+        let driven_speed = omega_driven.length();
+
+        if driven_speed > 1e-5 {
+            let dir = omega_driven / driven_speed;
+            let resist_step = resist_alpha * (dt * 2.5);
+
+            // Продольная компонента сопротивления только тормозит вращение (не может развернуть плиту вспять),
+            // а поперечная — плавно уводит полюс Эйлера в сторону от лобовой коллизии материков
+            let parallel_drag = resist_step.dot(dir).min(0.0);
+            let perp_deflect = resist_step - dir * resist_step.dot(dir);
+
+            let forward_speed = (driven_speed + parallel_drag).max(driven_speed * 0.25);
+            let new_omega = dir * forward_speed + perp_deflect * 0.55;
+            let new_speed = new_omega.length();
+
+            // При лобовом столкновении двух континентов разрешаем плите замедляться сильнее
+            let min_vel = if plate_in_collision[p_id] {
+                config.angular_vel_min * 0.45
+            } else {
+                config.angular_vel_min
+            };
+
+            if new_speed > 1e-5 {
+                let clamped_speed = new_speed.clamp(min_vel, config.angular_vel_max);
+                let pole = new_omega / new_speed;
+                plate.euler_pole = pole;
+                plate.angular_vel = clamped_speed;
+                plate.omega = pole * clamped_speed;
+            }
+        } else {
+            plate.angular_vel = config.angular_vel_min;
+            plate.omega = plate.euler_pole * plate.angular_vel;
+        }
     }
     let _ = cache;
 }

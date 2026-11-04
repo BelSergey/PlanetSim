@@ -25,13 +25,11 @@ pub fn advect_crust_and_plates(
         return;
     }
 
-    // 1. Мягкая защита от слияния двух центров Вороного в одну точку:
-    //    применяется только на малом радиусе `min_sep` (соответствующем `plate_min_area_ratio`),
-    //    чтобы не блокировать поглощение малых плит, и напрямую учитывается в `omega`.
+    // 1–2. Вычисляем единый кватернион шага `step_rots[p_id]` из `plate.omega * dt`
+    //      плюс мягкая поправка от слияния центров Вороного (без перманентной порчи plate.omega)
+    let mut omega_corr = vec![Vec3::ZERO; num_plates];
     if num_plates >= 2 && dt > 1e-6 {
         let min_sep = (4.0 * PI * config.plate_min_area_ratio.max(0.004)).sqrt() * 0.85;
-        let mut omega_corr = vec![Vec3::ZERO; num_plates];
-
         for i in 0..num_plates {
             for j in (i + 1)..num_plates {
                 let ci = geology.plates[i].center_dir;
@@ -39,34 +37,28 @@ pub fn advect_crust_and_plates(
                 let dot = ci.dot(cj).clamp(-1.0, 1.0);
                 let dist = dot.acos();
                 if dist > 1e-4 && dist < min_sep {
-                    let push_vel = ((min_sep - dist) * 0.35) / dt;
+                    let push_vel = ((min_sep - dist) * 0.20) / dt;
                     let axis_ij = ci.cross(cj).normalize_or_zero();
                     omega_corr[i] -= axis_ij * push_vel;
                     omega_corr[j] += axis_ij * push_vel;
                 }
             }
         }
-
-        for (i, plate) in geology.plates.iter_mut().enumerate() {
-            if omega_corr[i] != Vec3::ZERO {
-                let adjusted = plate.omega + omega_corr[i];
-                let spd = adjusted.length().clamp(0.05, config.angular_vel_max);
-                if adjusted.length() > 1e-5 {
-                    plate.euler_pole = adjusted.normalize();
-                    plate.angular_vel = spd;
-                    plate.omega = plate.euler_pole * spd;
-                }
-            }
-        }
     }
 
-    // 2. Единый кватернион шага `step_rots[p_id]` строго из физического вращения `plate.omega * dt`
     let mut step_rots = vec![Quat::IDENTITY; num_plates];
     let mut inv_step_rots = vec![Quat::IDENTITY; num_plates];
     let should_renorm = geology.sim_step.is_multiple_of(32);
 
     for (i, plate) in geology.plates.iter_mut().enumerate() {
-        let total_rot = Quat::from_axis_angle(plate.euler_pole, plate.angular_vel * dt);
+        let eff_omega = plate.omega + omega_corr[i];
+        let eff_speed = eff_omega.length().clamp(0.0, config.angular_vel_max * 1.25);
+        let total_rot = if eff_speed > 1e-5 {
+            Quat::from_axis_angle(eff_omega / eff_omega.length(), eff_speed * dt)
+        } else {
+            Quat::IDENTITY
+        };
+
         step_rots[i] = total_rot;
         inv_step_rots[i] = total_rot.inverse();
 

@@ -307,7 +307,9 @@ pub fn project_plates_and_boundaries(
             );
     }
 
-    if geology.sim_step.is_multiple_of(4) {
+    if dt == 0.0
+        || geology.sim_step.is_multiple_of(4)
+        || geology.sim_step as usize + 1 >= config.simulation_steps {
         update_crust_age_and_density_fast(topology, cache, geology, &is_spreading_ridge, config);
     } else {
         update_crust_age_fast(geology, &is_spreading_ridge, dt, config);
@@ -334,24 +336,27 @@ pub fn update_crust_age_fast(
         .zip(shifts.par_iter())
         .zip(is_spreading_ridge.par_iter())
         .for_each(|(((age_out, dens_out), shift), &is_ridge)| {
-            // Инкремент возраста: в зоне спрединга сбрасывается, иначе растёт
-            if is_ridge {
-                *age_out = 0.0;
-            } else {
-                *age_out = (*age_out + dt * 0.4).min(mature);
-            }
-
             let c_eff = shift[1];
             let cont_blend = smoothstep((c_eff - 0.32) / 0.24);
-            let age_norm = (*age_out / mature).clamp(0.0, 1.0).sqrt();
+            let cont_age = mature * (1.10 + c_eff * 1.50);
+
+            // Океаническая составляющая возраста: в зоне спрединга сбрасывается, иначе растёт до mature
+            let ocean_age = if is_ridge {
+                0.0
+            } else {
+                ((*age_out).min(mature) + dt * 0.4).min(mature)
+            };
+
+            *age_out = ocean_age * (1.0 - cont_blend) + cont_age * cont_blend;
+
+            let age_norm = (ocean_age / mature).clamp(0.0, 1.0).sqrt();
             let ocean_dens = young + age_norm * (old - young);
             *dens_out = ocean_dens * (1.0 - cont_blend) + cont * cont_blend;
         });
 }
 
-/// Точный (раз в 4 шага) пересчёт возраста/плотности коры через BFS
-/// от активных срединно-океанических хребтов. Использует уже импортированный
-/// `VecDeque`, `smoothstep` и `cache.avg_cell_rad`.
+/// Точный (раз в 4 шага и на финальном шаге) пересчёт возраста/плотности коры через BFS
+/// от активных срединно-океанических хребтов.
 pub fn update_crust_age_and_density_fast(
     topology: &WorldTopology,
     cache: &TectonicsGeometryCache,
@@ -367,8 +372,8 @@ pub fn update_crust_age_and_density_fast(
     // 1. Мульти-источниковый BFS от всех клеток спрединга
     let mut dist = vec![u32::MAX; num_cells];
     let mut queue = VecDeque::with_capacity(num_cells / 4);
-    for i in 0..num_cells {
-        if is_spreading_ridge[i] {
+    for (i, &is_ridge) in is_spreading_ridge.iter().enumerate().take(num_cells) {
+        if is_ridge {
             dist[i] = 0;
             queue.push_back(i);
         }
@@ -384,7 +389,6 @@ pub fn update_crust_age_and_density_fast(
     }
 
     // 2. Калибровка: 0.40 рад (~25° дуги) от хребта → зрелая кора.
-    //    При subdiv 7 (avg_cell_rad ≈ 0.00876) это ≈ 46 клеток от хребта.
     let mature = config.oceanic_mature_age.max(1e-4);
     let age_per_rad = mature / 0.40_f32;
     let young = config.young_ocean_density;
@@ -399,17 +403,17 @@ pub fn update_crust_age_and_density_fast(
         .enumerate()
         .for_each(|(i, ((age_out, dens_out), shift))| {
             let new_age = if dist[i] == u32::MAX {
-                // Изолированная клетка (нет ни одного хребта в связной сетке — фолбэк)
-                (*age_out + 0.045).min(mature)
+                ((*age_out).min(mature) + 0.045).min(mature)
             } else {
                 let dist_rad = dist[i] as f32 * cache.avg_cell_rad;
                 (dist_rad * age_per_rad).min(mature)
             };
-            *age_out = new_age;
 
-            // Смешивание океанической и континентальной плотности по c_eff
             let c_eff = shift[1];
             let cont_blend = smoothstep((c_eff - 0.32) / 0.24);
+            let cont_age = mature * (1.10 + c_eff * 1.50);
+            *age_out = new_age * (1.0 - cont_blend) + cont_age * cont_blend;
+
             let age_norm = (new_age / mature).clamp(0.0, 1.0).sqrt();
             let ocean_dens = young + age_norm * (old - young);
             *dens_out = ocean_dens * (1.0 - cont_blend) + cont * cont_blend;
