@@ -722,25 +722,23 @@ fn boundary_elevation_delta(
 
     // --- 1. Поперечная сдвиговая компонента (Transform / Strike-Slip Faults) ---
     let shear_mag = shear.clamp(0.0, 1.2);
-    // Доля чистого сдвига (максимальна, когда плиты скользят строго параллельно границе)
-    let strike_slip_dominance = (shear_mag / (shear_mag + convergence.abs() * 1.5 + 1e-4)).clamp(0.0, 1.0);
+    let strike_slip_dominance =
+        (shear_mag / (shear_mag + convergence.abs() * 1.5 + 1e-4)).clamp(0.0, 1.0);
     let mut dh_transform = 0.0_f32;
     let mut orog_transform = 0.0_f32;
 
     if shear_mag > 0.015 {
-        // На суше (тип Сан-Андреас / Мёртвое море): узкий сдвиговый ров (pull-apart) + боковые валы транспрессии
-        let fault_groove = -smoothstep((f - 0.78) / 0.22) * 0.085 * (0.7 + 0.3 * transform_stripes);
+        let fault_groove =
+            -smoothstep((f - 0.78) / 0.22) * 0.085 * (0.7 + 0.3 * transform_stripes);
         let transpression_shoulders =
             ((f / 0.82).clamp(0.0, 1.0) * PI).sin().powi(2) * 0.11 * ridge_mod;
         let dh_tr_cont = (fault_groove + transpression_shoulders) * shear_mag;
 
-        // В океане: ступенчатые трансформные желоба (Fracture Zones), рассекающие дно поперёк хребтов
         let fracture_trough = -smoothstep((f - 0.60) / 0.40)
             * config.transform_fault_amp
             * (1.1 + 0.6 * transform_stripes)
             * shear_mag;
 
-        // На стыке континент-океан: мягкая береговая терраса, сглаживающая перепад высот между плитами
         let margin_step_smooth = (c2 - c1) * 0.12 * smoothstep((f - 0.45) / 0.55);
 
         let both_cont = w_c1 * w_c2;
@@ -750,59 +748,61 @@ fn boundary_elevation_delta(
         dh_transform = both_cont * dh_tr_cont
             + both_ocean * fracture_trough
             + mixed * (margin_step_smooth + dh_tr_cont * 0.45);
-        orog_transform = (both_cont + mixed * 0.5) * (transpression_shoulders * 1.8 * shear_mag).clamp(0.0, 0.42);
+        orog_transform = (both_cont + mixed * 0.5)
+            * (transpression_shoulders * 1.8 * shear_mag).clamp(0.0, 0.42);
     }
 
-    // Если движение почти чисто сдвиговое, возвращаем сглаженный трансформный профиль
     if convergence.abs() < 0.02 {
         return (dh_transform, orog_transform, false);
     }
 
-    // --- 2. Конвергентная компонента (Сближение: Коллизия и Субдукция с полярностью) ---
+    // --- 2. Конвергентная компонента (Сближение: Коллизия и Субдукция) ---
     let (dh_norm, orog_norm, is_ridge) = if convergence > 0.0 {
         let conv_mag = convergence.clamp(0.0, 1.2);
+        // Корневая шкала (`sqrt`) гарантирует явный рельеф даже при умеренной скорости сближения плит
+        let eff_conv = conv_mag.sqrt().clamp(0.35, 1.15);
 
-        // 2.1. Коллизия двух континентов (Гималаи / Тибетское плато на наезжающей плите)
+        // 2.1. Коллизия двух континентов (Гималаи / Тибет)
         let cc_bell = smoothstep(f) * f.powf(0.75);
         let plateau_asym = if is_overriding_plate { 1.12 } else { 0.88 };
         let dh_cc = cc_bell * 0.44 * plateau_asym * thick_scale * ridge_mod * conv_mag;
         let orog_cc = (cc_bell * 0.95 * conv_mag).clamp(0.0, 1.0);
 
-        // 2.2. Субдукция Океан под Континент (Анды + преддуговой жёлоб + задуговой прогиб)
+        // 2.2. Субдукция Океан под Континент (Анды + глубокий жёлоб)
         let andes_outer_f = (1.0 - arc_offset_f * 0.85).clamp(0.42, 0.94);
         let andes_inner_f = 0.12_f32;
         let andes_span = (andes_outer_f - andes_inner_f).max(0.25);
         let andes_zone = ((f - andes_inner_f) / andes_span).clamp(0.0, 1.0);
         let andes_bell = (andes_zone * PI).sin().powi(2);
-        let seam_trench = smoothstep((f - 0.82) / 0.18) * (-trench_amp * 0.72) * conv_mag;
+        let seam_trench = smoothstep((f - 0.82) / 0.18) * (-trench_amp * 0.85) * eff_conv;
         let dh_co = andes_bell * 0.42 * thick_scale * ridge_mod * conv_mag + seam_trench;
         let orog_co = (andes_bell * 0.92 * conv_mag).clamp(0.0, 1.0);
 
-        // Океаническая плита, ныряющая под континент (внешний вал + глубоководный жёлоб)
-        let outer_swell_oc = ((f / 0.48).clamp(0.0, 1.0) * PI).sin().powi(2) * 0.035 * conv_mag;
-        let trench_bell = smoothstep((f - 0.30) / 0.70);
-        let dh_oc = outer_swell_oc - trench_bell * trench_amp * conv_mag;
+        let outer_swell_oc = ((f / 0.48).clamp(0.0, 1.0) * PI).sin().powi(2) * 0.045 * eff_conv;
+        let trench_bell = smoothstep((f - 0.28) / 0.72);
+        let dh_oc = outer_swell_oc - trench_bell * (trench_amp * 1.25) * eff_conv;
 
-        // 2.3. Субдукция Океан–Океан (Островная дуга + задуговой бассейн на верхней плите, жёлоб на нижней)
+        // 2.3. Субдукция Океан–Океан: ОДИН высокий, явный хребет на верхней плите + глубокий жёлоб на нижней
         let (dh_oo, orog_oo) = if is_overriding_plate {
-            let arc_outer_f = (1.0 - arc_offset_f).clamp(0.38, 0.92);
-            let arc_inner_f = 0.22_f32;
-            let arc_span = (arc_outer_f - arc_inner_f).max(0.22);
+            let arc_outer_f = (1.0 - arc_offset_f * 0.65).clamp(0.55, 0.92);
+            let arc_inner_f = 0.18_f32;
+            let arc_span = (arc_outer_f - arc_inner_f).max(0.24);
             let arc_zone = ((f - arc_inner_f) / arc_span).clamp(0.0, 1.0);
+            // Высокий сплошной подводно-островной хребет с острым гребнем
             let arc_bell = (arc_zone * PI).sin().powi(2);
-            let island_peaks = ((ridge_mod - 0.54).max(0.0) * 1.90).powf(1.30);
-            let arc_uplift = arc_bell * (0.18 + 0.40 * island_peaks) * thick_scale * conv_mag;
-            // Задуговой спрединг (Back-arc basin) в тылу островной дуги (`f < arc_inner_f`)
+            let island_peaks = ((ridge_mod - 0.48).max(0.0) * 1.75).powf(1.20);
+            let main_ridge_uplift =
+                arc_bell * (0.28 + 0.24 * ridge_mod + 0.22 * island_peaks) * thick_scale * eff_conv;
             let back_arc_trough =
-                -((f / arc_inner_f).clamp(0.0, 1.0) * PI).sin().powi(2) * 0.065 * conv_mag;
-            let trench_edge = smoothstep((f - 0.80) / 0.20) * (-trench_amp) * conv_mag;
+                -((f / arc_inner_f).clamp(0.0, 1.0) * PI).sin().powi(2) * 0.055 * eff_conv;
+            let trench_edge = smoothstep((f - 0.84) / 0.16) * (-trench_amp * 1.15) * eff_conv;
             (
-                arc_uplift + back_arc_trough + trench_edge,
-                (arc_bell * 0.78 * island_peaks * conv_mag).clamp(0.0, 1.0),
+                main_ridge_uplift + back_arc_trough + trench_edge,
+                (arc_bell * (0.65 + 0.35 * ridge_mod) * eff_conv).clamp(0.0, 1.0),
             )
         } else {
-            let outer_swell = ((f / 0.50).clamp(0.0, 1.0) * PI).sin().powi(2) * 0.04 * conv_mag;
-            let trench_drop = smoothstep((f - 0.35) / 0.65) * (-trench_amp) * conv_mag;
+            let outer_swell = ((f / 0.50).clamp(0.0, 1.0) * PI).sin().powi(2) * 0.05 * eff_conv;
+            let trench_drop = smoothstep((f - 0.32) / 0.68) * (-trench_amp * 1.35) * eff_conv;
             (outer_swell + trench_drop, 0.0)
         };
 
@@ -817,25 +817,33 @@ fn boundary_elevation_delta(
 
         (dh, orog, false)
     } else {
-        // --- 3. Дивергентная компонента (Расхождение: Рифт и СОХ с трансформным зигзагом) ---
+        // --- 3. Дивергентная компонента (Расхождение: Рифт и СОХ — два хребта с желобом посередине) ---
         let div_mag = (-convergence).clamp(0.0, 1.2);
+        let eff_div = div_mag.sqrt().clamp(0.40, 1.15);
 
-        // 3.1. Континентальный рифт (Восточно-Африканский тип / Байкал)
-        let graben = -smoothstep((f - 0.45) / 0.55) * 0.22 * rift_scale;
-        let horsts = ((f / 0.75).clamp(0.0, 1.0) * PI).sin().powi(2) * 0.14 * ridge_mod;
-        let dh_cc = (graben + horsts) * div_mag;
-        let orog_cc = (horsts * 2.5 * div_mag).clamp(0.0, 0.55);
+        // 3.1. Континентальный рифт (два плеча горстов с глубоким грабеном посередине)
+        let graben = -smoothstep((f - 0.55) / 0.45) * 0.24 * rift_scale;
+        let horsts = ((f / 0.72).clamp(0.0, 1.0) * PI).sin().powi(2) * 0.16 * ridge_mod;
+        let dh_cc = (graben + horsts) * eff_div;
+        let orog_cc = (horsts * 2.5 * eff_div).clamp(0.0, 0.55);
 
-        // 3.2. Срединно-океанический хребет (СОХ), рассечённый поперечными трансформными разломами
-        let transform_zig = transform_stripes * config.transform_fault_amp * (0.4 + 0.6 * shear_mag);
+        // 3.2. Срединно-океанический хребет (СОХ):
+        // На каждой из двух плит на `f ≈ 0.56` поднимается высокий хребет (`ridge_crest`),
+        // а прямо на шве (`f -> 1.0`) проваливается осевой рифтовый жёлоб (`axial_rift_valley`),
+        // что в сумме на двух плитах даёт ДВА параллельных хребта с глубоким жёлобом посередине!
+        let transform_zig =
+            transform_stripes * config.transform_fault_amp * (0.35 + 0.65 * shear_mag);
         let f_shifted = (f + transform_zig).clamp(0.0, 1.0);
-        let ridge_flanks = (f_shifted * PI * 0.72).sin().powi(2) * 0.16 * (0.65 + 0.35 * ridge_mod);
-        let axial_rift_valley = -smoothstep((f_shifted - 0.72) / 0.28) * 0.18 * rift_scale;
-        let dh_oo = (ridge_flanks + axial_rift_valley) * div_mag;
-        let orog_oo = (0.20 * f_shifted * div_mag).clamp(0.0, 0.35);
+
+        let flank_zone = ((f_shifted - 0.10) / 0.74).clamp(0.0, 1.0);
+        let ridge_crest =
+            (flank_zone * PI).sin().powi(2) * 0.27 * (0.72 + 0.28 * ridge_mod);
+        let axial_rift_valley = -smoothstep((f_shifted - 0.68) / 0.32) * 0.32 * rift_scale;
+        let dh_oo = (ridge_crest + axial_rift_valley) * eff_div;
+        let orog_oo = (ridge_crest * 1.6 * eff_div).clamp(0.0, 0.55);
 
         // 3.3. Пассивная рифтовая окраина океан-континент
-        let dh_mixed = -smoothstep(f) * 0.06 * rift_scale * div_mag;
+        let dh_mixed = -smoothstep(f) * 0.08 * rift_scale * eff_div;
 
         let both_cont = w_c1 * w_c2;
         let both_ocean = (1.0 - w_c1) * (1.0 - w_c2);
@@ -847,7 +855,6 @@ fn boundary_elevation_delta(
         (dh, orog, both_ocean > 0.45)
     };
 
-    // Плавно объединяем нормальную (сжатие/растяжение) и сдвиговую (трансформную) деформацию
     let total_dh = dh_norm + dh_transform * (0.45 + 0.55 * strike_slip_dominance);
     let total_orog = orog_norm.max(orog_transform);
 

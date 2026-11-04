@@ -267,7 +267,55 @@ pub fn advect_crust_and_plates(
     evolve_wilson_cycle_physical(topology, cache, geology, config);
 }
 
-/// Двигает клеточные границы `plate_ids` при субдукции и спрединге, сохраняя целостность континентальных ядер
+/// Проверяет, образуют ли соседи клетки `cell_i` с плитой `target_p` связный двумерный клин:
+/// возвращает `(кол-во соседей с target_p, кол-во пар таких соседей, которые сами граничат друг с другом)`.
+#[inline]
+fn contiguous_plate_support(
+    cell_i: usize,
+    target_p: usize,
+    plate_ids: &[usize],
+    cache: &TectonicsGeometryCache,
+) -> (usize, usize) {
+    let start = cache.edge_offsets[cell_i];
+    let end = cache.edge_offsets[cell_i + 1];
+
+    let mut same_nbrs = [usize::MAX; 12];
+    let mut same_cnt = 0usize;
+
+    for e in start..end {
+        let nbr = cache.edge_neighbors[e];
+        if plate_ids[nbr] == target_p && same_cnt < 12 {
+            same_nbrs[same_cnt] = nbr;
+            same_cnt += 1;
+        }
+    }
+
+    if same_cnt < 2 {
+        return (same_cnt, 0);
+    }
+
+    // Проверяем, сколько пар из `same_nbrs` являются непосредственными соседями друг другу
+    let mut mutual_pairs = 0usize;
+    for a in 0..same_cnt {
+        let u = same_nbrs[a];
+        let u_start = cache.edge_offsets[u];
+        let u_end = cache.edge_offsets[u + 1];
+        for b in (a + 1)..same_cnt {
+            let v = same_nbrs[b];
+            for ue in u_start..u_end {
+                if cache.edge_neighbors[ue] == v {
+                    mutual_pairs += 1;
+                    break;
+                }
+            }
+        }
+    }
+
+    (same_cnt, mutual_pairs)
+}
+
+/// Двигает клеточные границы `plate_ids` без встречного расслоения ("зебры")
+/// и убирает 1-клеточные полоски проверкой смежных пар соседей.
 fn migrate_cell_plate_boundaries(
     topology: &WorldTopology,
     cache: &TectonicsGeometryCache,
@@ -279,125 +327,160 @@ fn migrate_cell_plate_boundaries(
     let num_plates = geology.plates.len();
     scratch.next_plate_ids.copy_from_slice(&geology.plate_ids);
 
-    let plate_ids = &geology.plate_ids;
-    let cont_factor = &geology.continental_factor;
-    let next_pids = &mut scratch.next_plate_ids;
+    // Фаза А: строго антисимметричный кинематический перенос границ (без взаимного обмена клетками!)
+    {
+        let plate_ids = &geology.plate_ids;
+        let cont_factor = &geology.continental_factor;
+        let next_pids = &mut scratch.next_plate_ids;
 
-    // Фаза А: кинематический перенос границ между соседними клетками
-    next_pids.par_iter_mut().enumerate().for_each(|(i, pid_out)| {
-        let my_p = plate_ids[i];
-        if my_p >= num_plates || !geology.plates[my_p].is_alive {
-            return;
-        }
-
-        // Древнее континентальное ядро жёстко сцеплено со своей плитой и не отрывается поштучно
-        if cont_factor[i] > 0.62 {
-            return;
-        }
-
-        let start = cache.edge_offsets[i];
-        let end = cache.edge_offsets[i + 1];
-        let mut has_diff_nbr = false;
-        for e in start..end {
-            if plate_ids[cache.edge_neighbors[e]] != my_p {
-                has_diff_nbr = true;
-                break;
-            }
-        }
-        if !has_diff_nbr {
-            return;
-        }
-
-        let r_i = topology.cells[i].center;
-        let v_my = geology.plates[my_p].omega.cross(r_i);
-
-        let mut best_winner = my_p;
-        let mut best_invasion = 0.0_f32;
-
-        for e in start..end {
-            let nbr = cache.edge_neighbors[e];
-            let nbr_p = plate_ids[nbr];
-            if nbr_p == my_p || nbr_p >= num_plates || !geology.plates[nbr_p].is_alive {
-                continue;
-            }
-
-            // Вектор от соседа `nbr` к текущей клетке `i`
-            let dir_from_nbr = -cache.edge_tangent_dirs[e];
-            let step_rad = cache.edge_dists_rad[e].max(1e-4);
-            let v_nbr = geology.plates[nbr_p].omega.cross(r_i);
-
-            // Если соседняя плита является наезжающей (верхней) в зоне субдукции и движется на клетку `i`
-            let my_subducts = geology
-                .is_plate_subducting_under(my_p, nbr_p)
-                .unwrap_or(cont_factor[i] < cont_factor[nbr]);
-
-            let advance_vel = if my_subducts && cont_factor[i] < 0.45 {
-                // Наезжающая плита продвигается над жёлобом по мере погружения океанического слэба
-                v_nbr.dot(dir_from_nbr) - v_my.dot(dir_from_nbr) * 0.25
-            } else {
-                // В зоне спрединга или трансформного сдвига граница смещается со средней скоростью
-                0.5 * (v_nbr.dot(dir_from_nbr) + v_my.dot(dir_from_nbr))
-            };
-
-            let invasion_frac = (advance_vel * dt) / step_rad;
-            // Детерминированный порог фазы сетки для плавного пошагового продвижения границы
-            let cell_hash = ((i as f32 * 12.9898 + geology.sim_step as f32 * 4.1414).sin() * 43758.5)
-                .fract()
-                .abs();
-            let threshold = 0.22 + 0.55 * cell_hash;
-
-            if invasion_frac > threshold && invasion_frac > best_invasion {
-                best_invasion = invasion_frac;
-                best_winner = nbr_p;
-            }
-        }
-
-        *pid_out = best_winner;
-    });
-
-    // Фаза Б: сглаживание одиночных выступающих зубцов на границе (правило большинства соседей >= 4 из 6)
-    geology
-        .plate_ids
-        .par_iter_mut()
-        .enumerate()
-        .for_each(|(i, final_pid)| {
-            let cand_p = scratch.next_plate_ids[i];
-            let start = cache.edge_offsets[i];
-            let end = cache.edge_offsets[i + 1];
-            let deg = end - start;
-            if deg < 3 {
-                *final_pid = cand_p;
+        next_pids.par_iter_mut().enumerate().for_each(|(i, pid_out)| {
+            let my_p = plate_ids[i];
+            if my_p >= num_plates || !geology.plates[my_p].is_alive {
                 return;
             }
 
-            let mut same_cnt = 0usize;
-            let mut maj_p = cand_p;
-            let mut maj_cnt = 0usize;
+            // Континентальное ядро жёстко сцеплено со своей плитой
+            if cont_factor[i] > 0.60 {
+                return;
+            }
+
+            let start = cache.edge_offsets[i];
+            let end = cache.edge_offsets[i + 1];
+            let mut has_diff_nbr = false;
+            for e in start..end {
+                if plate_ids[cache.edge_neighbors[e]] != my_p {
+                    has_diff_nbr = true;
+                    break;
+                }
+            }
+            if !has_diff_nbr {
+                return;
+            }
+
+            let r_i = topology.cells[i].center;
+            let v_my = geology.plates[my_p].omega.cross(r_i);
+
+            let mut best_winner = my_p;
+            let mut best_invasion = 0.0_f32;
 
             for e in start..end {
-                let np = scratch.next_plate_ids[cache.edge_neighbors[e]];
-                if np == cand_p {
-                    same_cnt += 1;
+                let nbr = cache.edge_neighbors[e];
+                let nbr_p = plate_ids[nbr];
+                if nbr_p == my_p || nbr_p >= num_plates || !geology.plates[nbr_p].is_alive {
+                    continue;
+                }
+
+                // Чтобы граница двигалась связным фронтом, а не пускала тонкие "иголки",
+                // у захватывающей плиты `nbr_p` уже должна быть связная пара смежных соседей вокруг `i`!
+                let (nbr_same_cnt, nbr_mutual_pairs) =
+                    contiguous_plate_support(i, nbr_p, plate_ids, cache);
+                if nbr_same_cnt < 2 || nbr_mutual_pairs == 0 {
+                    continue;
+                }
+
+                // Единичный вектор от соседа `nbr` к текущей клетке `i`
+                let n_to_i = -cache.edge_tangent_dirs[e];
+                let step_rad = cache.edge_dists_rad[e].max(1e-4);
+                let v_nbr = geology.plates[nbr_p].omega.cross(r_i);
+
+                // Скорость сближения вдоль ребра (положительна при конвергенции, отрицательна при спрединге)
+                let rel_conv = (v_nbr - v_my).dot(n_to_i);
+
+                let advance_vel = if rel_conv > 0.0 {
+                    // СБЛИЖЕНИЕ: только верхняя (наезжающая) плита может продвигаться над нижней!
+                    // Нижняя плита уходит в мантию и никогда не "прорастает" полосками внутрь верхней.
+                    let my_subducts = geology
+                        .is_plate_subducting_under(my_p, nbr_p)
+                        .unwrap_or(cont_factor[i] < cont_factor[nbr]);
+                    if my_subducts && cont_factor[i] < 0.45 {
+                        v_nbr.dot(n_to_i).max(0.0) * 0.42
+                    } else {
+                        0.0
+                    }
                 } else {
-                    let mut cnt = 0usize;
-                    for e2 in start..end {
-                        if scratch.next_plate_ids[cache.edge_neighbors[e2]] == np {
-                            cnt += 1;
-                        }
-                    }
-                    if cnt > maj_cnt {
-                        maj_cnt = cnt;
-                        maj_p = np;
-                    }
+                    // РАСХОЖДЕНИЕ / СДВИГ: ось хребта дрейфует со средней скоростью `0.5 * (v_my + v_nbr)`.
+                    // Так как `n_to_i` противоположна для `i` и `nbr`, положительный дрейф возможен только в одну сторону!
+                    let drift = 0.5 * (v_nbr + v_my).dot(n_to_i);
+                    drift.max(0.0) * 0.38
+                };
+
+                let invasion_frac = (advance_vel * dt) / step_rad;
+                let cell_hash =
+                    ((i as f32 * 12.9898 + geology.sim_step as f32 * 4.1414).sin() * 43758.5)
+                        .fract()
+                        .abs();
+                let threshold = 0.26 + 0.45 * cell_hash;
+
+                if invasion_frac > threshold && invasion_frac > best_invasion {
+                    best_invasion = invasion_frac;
+                    best_winner = nbr_p;
                 }
             }
 
-            if same_cnt <= 1 && maj_cnt >= deg.saturating_sub(2) {
-                *final_pid = maj_p;
-            } else {
-                *final_pid = cand_p;
-            }
+            *pid_out = best_winner;
         });
+    }
+
+    // Фаза Б: 3 итерации топологической зачистки полосок и "зебры"
+    // Клетка сохраняет плиту ТОЛЬКО если у неё есть хотя бы 2 соседа своей плиты, которые сами являются соседями друг другу!
+    for pass in 0..3 {
+        let (src, dst) = if pass % 2 == 0 {
+            (&scratch.next_plate_ids, &mut geology.plate_ids)
+        } else {
+            (&geology.plate_ids, &mut scratch.next_plate_ids)
+        };
+
+        dst.par_iter_mut().enumerate().for_each(|(i, out_pid)| {
+            let cand_p = src[i];
+            let start = cache.edge_offsets[i];
+            let end = cache.edge_offsets[i + 1];
+            if end - start < 3 {
+                *out_pid = cand_p;
+                return;
+            }
+
+            let (my_cnt, my_pairs) = contiguous_plate_support(i, cand_p, src, cache);
+
+            // Если у клетки есть связный треугольник своей плиты (`my_pairs >= 1`) и хотя бы 2 соседа — она устойчива
+            if my_pairs >= 1 && my_cnt >= 2 {
+                // Исключение: если 4+ соседей образуют мощное полукольцо другой плиты (выравнивание узких выемок)
+                if my_cnt == 2 {
+                    for e in start..end {
+                        let np = src[cache.edge_neighbors[e]];
+                        if np != cand_p {
+                            let (n_cnt, n_pairs) = contiguous_plate_support(i, np, src, cache);
+                            if n_cnt >= 4 && n_pairs >= 3 {
+                                *out_pid = np;
+                                return;
+                            }
+                        }
+                    }
+                }
+                *out_pid = cand_p;
+                return;
+            }
+
+            // Иначе клетка лежит в 1-гексовой полоске / зубце (`my_pairs == 0`) — отдаём её соседней плите
+            // с максимальным числом взаимно-смежных пар (а при равенстве — с максимальным числом соседей)
+            let mut best_p = cand_p;
+            let mut best_score = 0usize;
+
+            for e in start..end {
+                let np = src[cache.edge_neighbors[e]];
+                if np == cand_p {
+                    continue;
+                }
+                let (n_cnt, n_pairs) = contiguous_plate_support(i, np, src, cache);
+                let score = n_pairs * 10 + n_cnt;
+                if score > best_score {
+                    best_score = score;
+                    best_p = np;
+                }
+            }
+
+            *out_pid = best_p;
+        });
+    }
 }
 
 /// Физический цикл Уилсона без принудительного поддержания числа плит:
