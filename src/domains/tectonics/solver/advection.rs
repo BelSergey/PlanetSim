@@ -4,6 +4,9 @@ use super::{
     TectonicsGeometryCache, TectonicsScratch, boundaries::fast_domain_warp,
     init::find_closest_plates_and_boundary_dists,
 };
+
+use super::super::tectonics_data::{CratonLobe, Plate, MAX_PLATE_CRATON_LOBES};
+
 use crate::{
     domains::tectonics::{tectonics_config::TectonicsConfig, tectonics_data::GeologyLayer},
     world::topology::WorldTopology,
@@ -62,14 +65,22 @@ pub fn advect_crust_and_plates(
         step_rots[i] = total_rot;
         inv_step_rots[i] = total_rot.inverse();
 
-        plate.center_dir = total_rot * plate.center_dir;
+        plate.center_dir   = total_rot * plate.center_dir;
         plate.craton_center = total_rot * plate.craton_center;
-        plate.accum_rot = total_rot * plate.accum_rot;
+        plate.accum_rot     = total_rot * plate.accum_rot;
+
+        // NEW: лопасти вращаются той же ротацией
+        for k in 0..plate.lobe_count as usize {
+            plate.lobes[k].center = total_rot * plate.lobes[k].center;
+        }
 
         if should_renorm {
-            plate.center_dir = plate.center_dir.normalize_or_zero();
+            plate.center_dir    = plate.center_dir.normalize_or_zero();
             plate.craton_center = plate.craton_center.normalize_or_zero();
-            plate.accum_rot = plate.accum_rot.normalize();
+            plate.accum_rot     = plate.accum_rot.normalize();
+            for k in 0..plate.lobe_count as usize {
+                plate.lobes[k].center = plate.lobes[k].center.normalize_or_zero();
+            }
         }
     }
 
@@ -242,25 +253,44 @@ fn recycle_and_split_voronoi_plates(
 
     // 1. Аккреция террейна: если у поглощаемой плиты `dead_id` был остаток континентального кратона,
     //    припаиваем его площадь к ближайшей соседней плите, чтобы континент не исчезал бесследно.
-    let dead_craton_r = geology.plates[dead_id].craton_radius;
-    if dead_craton_r > 0.02 {
-        let dead_dir = geology.plates[dead_id].center_dir;
-        if let Some((host_id, _)) = geology
+    let dead_plate = geology.plates[dead_id];
+    if dead_plate.craton_radius > 0.02 {
+        let dead_dir = dead_plate.center_dir;
+        if let Some(host_id) = geology
             .plates
             .iter()
             .enumerate()
             .filter(|&(idx, _)| idx != dead_id)
             .max_by(|(_, a), (_, b)| {
-                a.center_dir
-                    .dot(dead_dir)
-                    .total_cmp(&b.center_dir.dot(dead_dir))
+                a.center_dir.dot(dead_dir).total_cmp(&b.center_dir.dot(dead_dir))
             })
+            .map(|(idx, _)| idx)
         {
             let host = &mut geology.plates[host_id];
-            let combined_r = (host.craton_radius.powi(2) + dead_craton_r.powi(2))
-                .sqrt()
-                .min(0.65);
-            host.craton_radius = combined_r;
+
+            // Переносим активные лопасти, пока есть место
+            for k in 0..dead_plate.lobe_count as usize {
+                if (host.lobe_count as usize) >= MAX_PLATE_CRATON_LOBES { break; }
+                let lobe = dead_plate.lobes[k];
+                if lobe.radius > 1e-6 {
+                    host.lobes[host.lobe_count as usize] = lobe;
+                    host.lobe_count += 1;
+                }
+            }
+            // Старые сейвы: craton_radius есть, а лопастей нет — синтезируем одну
+            if dead_plate.lobe_count == 0
+                && (host.lobe_count as usize) < MAX_PLATE_CRATON_LOBES
+            {
+                host.lobes[host.lobe_count as usize] = CratonLobe {
+                    center: dead_plate.craton_center,
+                    radius: dead_plate.craton_radius,
+                    seed_offset: dead_plate.seed_offset,
+                };
+                host.lobe_count += 1;
+            }
+
+            host.recompute_craton_from_lobes();
+            host.craton_radius = host.craton_radius.min(0.65); // сохраняем прежний кап
         }
     }
 
@@ -296,27 +326,8 @@ fn recycle_and_split_voronoi_plates(
     let new_child_center =
         (parent.center_dir * sep_angle.cos() + tangent * sep_angle.sin()).normalize_or_zero();
 
-    let (parent_craton_center, parent_craton_rad, child_craton_center, child_craton_rad) = if parent
-        .craton_radius
-        > 0.04
-    {
-        let craton_tang = (tangent - parent.craton_center * parent.craton_center.dot(tangent))
-            .normalize_or_zero();
-        let craton_sep = (parent.craton_radius * 0.48).clamp(0.05, 0.28);
-        let c_parent = (parent.craton_center * craton_sep.cos() - craton_tang * craton_sep.sin())
-            .normalize_or_zero();
-        let c_child = (parent.craton_center * craton_sep.cos() + craton_tang * craton_sep.sin())
-            .normalize_or_zero();
-        // Сумма площадей фрагментов (0.74^2 + 0.67^2 ≈ 1.0) сохраняет исходную площадь континента
-        (
-            c_parent,
-            parent.craton_radius * 0.74,
-            c_child,
-            parent.craton_radius * 0.67,
-        )
-    } else {
-        (new_parent_center, 0.0, new_child_center, 0.0)
-    };
+    let (parent_lobes, parent_lobe_count, child_lobes, child_lobe_count) =
+    split_craton_lobes(&parent, tangent);
 
     let rot_parent = Quat::from_rotation_arc(parent.center_dir, new_parent_center);
     let rot_child = Quat::from_rotation_arc(parent.center_dir, new_child_center);
@@ -335,13 +346,28 @@ fn recycle_and_split_voronoi_plates(
         parent.euler_pole
     };
 
-    geology.plates[largest_plate].center_dir = new_parent_center;
-    geology.plates[largest_plate].euler_pole = parent_pole;
-    geology.plates[largest_plate].angular_vel = parent_speed;
-    geology.plates[largest_plate].omega = parent_pole * parent_speed;
-    geology.plates[largest_plate].accum_rot = rot_parent * parent.accum_rot;
-    geology.plates[largest_plate].craton_center = parent_craton_center;
-    geology.plates[largest_plate].craton_radius = parent_craton_rad;
+    {
+        let p = &mut geology.plates[largest_plate];
+        p.center_dir  = new_parent_center;
+        p.euler_pole  = parent_pole;
+        p.angular_vel = parent_speed;
+        p.omega       = parent_pole * parent_speed;
+        p.accum_rot   = rot_parent * parent.accum_rot;
+
+        p.lobes      = parent_lobes;
+        p.lobe_count = parent_lobe_count;
+        // Лопасти были в старой системе `parent.center_dir` — доворачиваем
+        for k in 0..p.lobe_count as usize {
+            p.lobes[k].center = rot_parent * p.lobes[k].center;
+        }
+        p.recompute_craton_from_lobes();
+
+        // Раскол сбрасывает часть накоплений
+        p.tension_axis = rot_parent * parent.tension_axis;
+        p.internal_tension *= 0.5;
+        p.mantle_heat      *= 0.6;
+        p.is_alive          = true;
+    }
 
     let child_omega = parent.omega + kick_pole * kick_mag;
     let child_speed = child_omega
@@ -353,19 +379,48 @@ fn recycle_and_split_voronoi_plates(
         parent.euler_pole
     };
 
-    let old_hue = geology.plates[dead_id].color_hue;
-    geology.plates[dead_id] = super::super::tectonics_data::Plate {
-        center_dir: new_child_center,
-        euler_pole: child_pole,
+    let old_hue = geology.plates[dead_id].color_hue; // читаем ДО перезаписи слота
+
+    let mut child = Plate {
+        center_dir:  new_child_center,
+        euler_pole:  child_pole,
         angular_vel: child_speed,
-        omega: child_pole * child_speed,
-        accum_rot: rot_child * parent.accum_rot,
+        omega:       child_pole * child_speed,
+        accum_rot:   rot_child * parent.accum_rot,
         base_elevation_offset: parent.base_elevation_offset,
-        craton_center: child_craton_center,
-        craton_radius: child_craton_rad,
+
+        // Эти два поля перезапишет recompute_craton_from_lobes — временные значения
+        craton_center: new_child_center,
+        craton_radius: 0.0,
+
+        lobes:      child_lobes,
+        lobe_count: child_lobe_count,
+
         seed_offset: parent.seed_offset + 17.3,
-        color_hue: old_hue,
+        color_hue:   old_hue,
+
+        tension_axis: rot_child * parent.tension_axis,
+        internal_tension: 0.0,
+        mantle_heat:      0.0,
+        is_alive:         true,
     };
+
+    for k in 0..child.lobe_count as usize {
+        child.lobes[k].center = rot_child * child.lobes[k].center;
+        child.lobes[k].seed_offset += 11.9; // немного разные шумовые паттерны у фрагментов
+    }
+    child.recompute_craton_from_lobes();
+
+    geology.plates[dead_id] = child;
+
+    let n = geology.plates.len();
+    for other in 0..n {
+        if other == dead_id { continue; }
+        let row = dead_id * n + other;
+        let col = other * n + dead_id;
+        if row < geology.subduction_polarity.len() { geology.subduction_polarity[row] = 0; }
+        if col < geology.subduction_polarity.len() { geology.subduction_polarity[col] = 0; }
+    }
 
     // 4. Перепривязываем вулканы к актуальным плитам, чтобы вулканы старой `dead_id`
     //    и расколовшейся `largest_plate` вращались со своей физической плитой
@@ -379,4 +434,79 @@ fn recycle_and_split_voronoi_plates(
             v.plate_id = new_p_id;
         }
     }
+}
+
+fn split_craton_lobes(
+    parent: &Plate,
+    tangent: Vec3,
+) -> (
+    [CratonLobe; MAX_PLATE_CRATON_LOBES], u8,
+    [CratonLobe; MAX_PLATE_CRATON_LOBES], u8,
+) {
+    let mut p = [CratonLobe::default(); MAX_PLATE_CRATON_LOBES];
+    let mut pc = 0u8;
+    let mut c = [CratonLobe::default(); MAX_PLATE_CRATON_LOBES];
+    let mut cc = 0u8;
+
+    // Старые сейвы: craton_radius задан, а лопастей нет — синтезируем одну «виртуальную»
+    let mut src = [CratonLobe::default(); MAX_PLATE_CRATON_LOBES];
+    let src_n: usize = if parent.lobe_count > 0 {
+        let n = (parent.lobe_count as usize).min(MAX_PLATE_CRATON_LOBES);
+        src[..n].copy_from_slice(&parent.lobes[..n]);
+        n
+    } else if parent.craton_radius > 0.04 {
+        src[0] = CratonLobe {
+            center: parent.craton_center,
+            radius: parent.craton_radius,
+            seed_offset: parent.seed_offset,
+        };
+        1
+    } else {
+        0
+    };
+
+    // Проход 1: каждая лопасть уходит на ту сторону рифта, куда смотрит её центр
+    for k in 0..src_n {
+        let lobe = src[k];
+        if lobe.radius <= 1e-6 { continue; }
+        if lobe.center.dot(tangent) >= 0.0 {
+            if (cc as usize) < MAX_PLATE_CRATON_LOBES { c[cc as usize] = lobe; cc += 1; }
+        } else if (pc as usize) < MAX_PLATE_CRATON_LOBES { p[pc as usize] = lobe; pc += 1; }
+    }
+
+    // Проход 2: если одна из сторон пустая — раскалываем крупнейшую лопасть
+    // (сохранение площади: 2·(r/√2)² = r²)
+    if src_n > 0 && (pc == 0) ^ (cc == 0) {
+        let (big, big_idx, from_parent) = if pc > 0 {
+            let i = (0..pc as usize)
+                .max_by(|&a, &b| p[a].radius.total_cmp(&p[b].radius)).unwrap();
+            (p[i], i, true)
+        } else {
+            let i = (0..cc as usize)
+                .max_by(|&a, &b| c[a].radius.total_cmp(&c[b].radius)).unwrap();
+            (c[i], i, false)
+        };
+        let ct = (tangent - big.center * big.center.dot(tangent)).normalize_or_zero();
+        if ct != Vec3::ZERO {
+            let sep = (big.radius * 0.48).clamp(0.05, 0.28);
+            let a = (big.center * sep.cos() - ct * sep.sin()).normalize_or_zero();
+            let b = (big.center * sep.cos() + ct * sep.sin()).normalize_or_zero();
+            let frag = big.radius * std::f32::consts::FRAC_1_SQRT_2;
+            if from_parent {
+                p[big_idx] = CratonLobe { center: a, radius: frag, seed_offset: big.seed_offset };
+                if (cc as usize) < MAX_PLATE_CRATON_LOBES {
+                    c[cc as usize] = CratonLobe { center: b, radius: frag, seed_offset: big.seed_offset + 3.7 };
+                    cc += 1;
+                }
+            } else {
+                c[big_idx] = CratonLobe { center: b, radius: frag, seed_offset: big.seed_offset };
+                if (pc as usize) < MAX_PLATE_CRATON_LOBES {
+                    p[pc as usize] = CratonLobe { center: a, radius: frag, seed_offset: big.seed_offset + 3.7 };
+                    pc += 1;
+                }
+            }
+        }
+    }
+
+    (p, pc, c, cc)
 }

@@ -116,9 +116,9 @@ impl Default for ClimateConfig {
             mountain_base_level: 0.1,
             mountain_blend_width: 0.02,
 
-            ocean_current_speed_multiplier: 0.15,
+            ocean_current_speed_multiplier: 0.45,
             boundary_current_multiplier: 4.0,
-            ocean_advection_rate: 1.50,
+            ocean_advection_rate: 0.99,
 
             geostrophic_multiplier: 2.0,
 

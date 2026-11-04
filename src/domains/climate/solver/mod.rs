@@ -606,7 +606,7 @@ fn simulate_single_season(
     let mut current_speed = vec![0.0f32; num_cells];
 
     let ref_current_speed = (1.5 * config.ocean_current_speed_multiplier).max(0.05);
-    let ocean_advection_max = config.ocean_advection_rate.min(0.85);
+    let ocean_advection_max = config.ocean_advection_rate.min(0.99);
 
     // --- 4. Цикл равновесия ---
     let iterations = config.equilibrium_iterations.max(1);
@@ -730,7 +730,7 @@ fn simulate_single_season(
                 }
                 let incoming = upwind / total_ocean[i];
                 let norm_speed = (current_speed[i] / ref_current_speed).clamp(0.0, 1.0);
-                let step_rate = norm_speed * ocean_advection_max;
+                let step_rate: f32 = norm_speed * ocean_advection_max;
                 *o = prev[i] * (1.0 - step_rate) + incoming * step_rate;
             });
         }
@@ -778,7 +778,7 @@ fn simulate_single_season(
 
         // Ж) Радиационный баланс
         let air_blend = (config.heat_advection_strength * 0.55).clamp(0.0, 0.85);
-        let ocean_blend = config.ocean_advection_rate.clamp(0.0, 0.85);
+        let ocean_blend = config.ocean_advection_rate.clamp(0.0, 0.99);
 
         let ocean_temps = &scratch.ocean_temps;
         let advected_temps = &scratch.advected_temps;
