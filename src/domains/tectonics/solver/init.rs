@@ -148,6 +148,7 @@ pub(crate) fn craton_continental_factor(dir: Vec3, plate: &Plate) -> f32 {
 }
 
 /// Находит 3 ближайшие живые плиты и возвращает геодезические расстояния до границ Вороного (в радианах)
+#[allow(unused)]
 #[inline]
 pub(crate) fn find_closest_plates_and_boundary_dists(
     dir: Vec3,
@@ -483,7 +484,7 @@ fn build_top_down_cratons_sutures_and_plates(
     // Собираем все кратонные ядра (террейны) со всех континентальных плит
     struct KernelSeed {
         plate_id: usize,
-        lobe_idx: usize,
+        _lobe_idx: usize,
         seed_cell: usize,
         speed_inv: f32,
         noise_seed: f32,
@@ -503,7 +504,7 @@ fn build_top_down_cratons_sutures_and_plates(
                 let speed = (0.75 + ((lobe.seed_offset * 1.37).sin().abs()) * 0.65).max(0.4);
                 kernels.push(KernelSeed {
                     plate_id: p_id,
-                    lobe_idx: l_idx,
+                    _lobe_idx: l_idx,
                     seed_cell,
                     speed_inv: 1.0 / speed,
                     noise_seed: lobe.seed_offset,
@@ -514,7 +515,7 @@ fn build_top_down_cratons_sutures_and_plates(
             let seed_cell = find_nearest_cell(topology, plate.craton_center);
             kernels.push(KernelSeed {
                 plate_id: p_id,
-                lobe_idx: 0,
+                _lobe_idx: 0,
                 seed_cell,
                 speed_inv: 1.0,
                 noise_seed: plate.seed_offset,

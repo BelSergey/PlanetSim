@@ -65,34 +65,6 @@ pub struct Plate {
     pub is_alive: bool,
 }
 
-#[warn(deprecated)]
-impl Plate {
-    /// Пересчитывает `craton_center` и `craton_radius` как центроид и
-    /// эквивалентный радиус `√Σ(rᵢ²)` по активным лопастям.
-    pub fn recompute_craton_from_lobes(&mut self) {
-        if self.lobe_count == 0 {
-            self.craton_center = self.center_dir;
-            self.craton_radius = 0.0;
-            return;
-        }
-        let mut sum = Vec3::ZERO;
-        let mut sum_r2 = 0.0_f32;
-        for k in 0..self.lobe_count as usize {
-            let lobe = &self.lobes[k];
-            let w = lobe.radius * lobe.radius;
-            sum += lobe.center * w;
-            sum_r2 += w;
-        }
-        self.craton_center = if sum.length_squared() > 1e-8 {
-            sum.normalize_or_zero()
-        } else {
-            self.center_dir
-        };
-        // √Σr² совместим с area-preserving комбинацией √(a²+b²) в аккреции
-        self.craton_radius = sum_r2.sqrt();
-    }
-}
-
 impl Default for Plate {
     fn default() -> Self {
         Self {

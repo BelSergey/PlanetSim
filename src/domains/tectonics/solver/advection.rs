@@ -1,19 +1,84 @@
-// src/domains/tectonics/solver/advection.rs:
+// src/domains/tectonics/solver/advection.rs
 
-use super::{
-    TectonicsGeometryCache, TectonicsScratch, boundaries::fast_domain_warp,
-    init::find_closest_plates_and_boundary_dists,
-};
-
-use super::super::tectonics_data::{CratonLobe, Plate, MAX_PLATE_CRATON_LOBES};
-
+use super::{TectonicsGeometryCache, TectonicsScratch, init::craton_continental_factor};
 use crate::{
-    domains::tectonics::{tectonics_config::TectonicsConfig, tectonics_data::GeologyLayer},
+    domains::tectonics::{
+        tectonics_config::TectonicsConfig,
+        tectonics_data::{CratonLobe, GeologyLayer, MAX_PLATE_CRATON_LOBES, Plate},
+    },
     world::topology::WorldTopology,
 };
 use bevy::math::{Quat, Vec3};
 use rayon::prelude::*;
-use std::f32::consts::PI;
+
+/// Находит клетку отправления/назначения вдоль геодезического сдвига к `r_target` внутри той же плиты `p_id`
+/// и возвращает `(best_cell, neighbor_cell, blend_frac, min_max_bounds)`.
+#[inline]
+fn trace_same_plate_step(
+    start_cell: usize,
+    p_id: usize,
+    r_target: Vec3,
+    plate_ids: &[usize],
+    topology: &WorldTopology,
+    cache: &TectonicsGeometryCache,
+) -> (usize, usize, f32) {
+    let mut curr = start_cell;
+    let mut best_dot = topology.cells[curr].center.dot(r_target);
+
+    for _ in 0..4 {
+        let start = cache.edge_offsets[curr];
+        let end = cache.edge_offsets[curr + 1];
+        let mut next_cell = curr;
+        for e in start..end {
+            let nbr = cache.edge_neighbors[e];
+            if plate_ids[nbr] != p_id {
+                continue;
+            }
+            let d = topology.cells[nbr].center.dot(r_target);
+            if d > best_dot {
+                best_dot = d;
+                next_cell = nbr;
+            }
+        }
+        if next_cell == curr {
+            break;
+        }
+        curr = next_cell;
+    }
+
+    let r_curr = topology.cells[curr].center;
+    let residual = r_target - r_curr * r_curr.dot(r_target);
+    let res_len = residual.length();
+
+    if res_len > 1e-5 {
+        let res_dir = residual / res_len;
+        let start = cache.edge_offsets[curr];
+        let end = cache.edge_offsets[curr + 1];
+        let mut best_nbr = curr;
+        let mut best_align = 0.0_f32;
+        let mut best_step_rad = cache.avg_cell_rad;
+
+        for e in start..end {
+            let nbr = cache.edge_neighbors[e];
+            if plate_ids[nbr] != p_id {
+                continue;
+            }
+            let align = cache.edge_tangent_dirs[e].dot(res_dir);
+            if align > best_align {
+                best_align = align;
+                best_nbr = nbr;
+                best_step_rad = cache.edge_dists_rad[e];
+            }
+        }
+
+        if best_nbr != curr && best_align > 0.15 {
+            let frac = ((res_len * best_align) / best_step_rad.max(1e-5)).clamp(0.0, 1.0);
+            return (curr, best_nbr, frac);
+        }
+    }
+
+    (curr, curr, 0.0)
+}
 
 pub fn advect_crust_and_plates(
     topology: &WorldTopology,
@@ -24,40 +89,24 @@ pub fn advect_crust_and_plates(
     dt: f32,
 ) {
     let num_plates = geology.plates.len();
-    if num_plates == 0 {
+    let num_cells = topology.cells.len();
+    if num_plates == 0 || num_cells == 0 {
         return;
     }
+    geology.ensure_aux_buffers(num_cells);
 
-    // 1–2. Вычисляем единый кватернион шага `step_rots[p_id]` из `plate.omega * dt`
-    //      плюс мягкая поправка от слияния центров Вороного (без перманентной порчи plate.omega)
-    let mut omega_corr = vec![Vec3::ZERO; num_plates];
-    if num_plates >= 2 && dt > 1e-6 {
-        let min_sep = (4.0 * PI * config.plate_min_area_ratio.max(0.004)).sqrt() * 0.85;
-        for i in 0..num_plates {
-            for j in (i + 1)..num_plates {
-                let ci = geology.plates[i].center_dir;
-                let cj = geology.plates[j].center_dir;
-                let dot = ci.dot(cj).clamp(-1.0, 1.0);
-                let dist = dot.acos();
-                if dist > 1e-4 && dist < min_sep {
-                    let push_vel = ((min_sep - dist) * 0.20) / dt;
-                    let axis_ij = ci.cross(cj).normalize_or_zero();
-                    omega_corr[i] -= axis_ij * push_vel;
-                    omega_corr[j] += axis_ij * push_vel;
-                }
-            }
-        }
-    }
-
+    // 1. Вычисляем кватернионы прямого и обратного поворота плит за шаг `dt`
     let mut step_rots = vec![Quat::IDENTITY; num_plates];
     let mut inv_step_rots = vec![Quat::IDENTITY; num_plates];
     let should_renorm = geology.sim_step.is_multiple_of(32);
 
     for (i, plate) in geology.plates.iter_mut().enumerate() {
-        let eff_omega = plate.omega + omega_corr[i];
-        let eff_speed = eff_omega.length().clamp(0.0, config.angular_vel_max * 1.25);
+        if !plate.is_alive {
+            continue;
+        }
+        let eff_speed = plate.omega.length().clamp(0.0, config.angular_vel_max * 1.25);
         let total_rot = if eff_speed > 1e-5 {
-            Quat::from_axis_angle(eff_omega / eff_omega.length(), eff_speed * dt)
+            Quat::from_axis_angle(plate.omega / plate.omega.length(), eff_speed * dt)
         } else {
             Quat::IDENTITY
         };
@@ -65,26 +114,28 @@ pub fn advect_crust_and_plates(
         step_rots[i] = total_rot;
         inv_step_rots[i] = total_rot.inverse();
 
-        plate.center_dir   = total_rot * plate.center_dir;
+        plate.center_dir = total_rot * plate.center_dir;
         plate.craton_center = total_rot * plate.craton_center;
-        plate.accum_rot     = total_rot * plate.accum_rot;
+        plate.tension_axis = total_rot * plate.tension_axis;
+        plate.accum_rot = total_rot * plate.accum_rot;
 
-        // NEW: лопасти вращаются той же ротацией
-        for k in 0..plate.lobe_count as usize {
-            plate.lobes[k].center = total_rot * plate.lobes[k].center;
+        let lobe_cnt = (plate.lobe_count as usize).min(MAX_PLATE_CRATON_LOBES);
+        for l_idx in 0..lobe_cnt {
+            plate.lobes[l_idx].center = total_rot * plate.lobes[l_idx].center;
+            if should_renorm {
+                plate.lobes[l_idx].center = plate.lobes[l_idx].center.normalize_or_zero();
+            }
         }
 
         if should_renorm {
-            plate.center_dir    = plate.center_dir.normalize_or_zero();
+            plate.center_dir = plate.center_dir.normalize_or_zero();
             plate.craton_center = plate.craton_center.normalize_or_zero();
-            plate.accum_rot     = plate.accum_rot.normalize();
-            for k in 0..plate.lobe_count as usize {
-                plate.lobes[k].center = plate.lobes[k].center.normalize_or_zero();
-            }
+            plate.tension_axis = plate.tension_axis.normalize_or_zero();
+            plate.accum_rot = plate.accum_rot.normalize();
         }
     }
 
-    // 3. Вращаем вулканы тем же `step_rots[v.plate_id]` и применяем экспоненциальное затухание
+    // 2. Вращаем вулканы вместе с их плитами и переводим потерянную от эрозии высоту в ширину щита
     let decay = (-config.volcano_erosion_rate * dt * 0.85).exp();
     let max_volc_radius = (config.hotspot_radius_base * 2.8).max(0.14);
 
@@ -106,106 +157,256 @@ pub fn advect_crust_and_plates(
     let min_volcano_h = config.hotspot_height_min * 0.14;
     geology.volcanoes.retain(|v| v.height > min_volcano_h);
 
-    // 4. Полулагранжева адвекция `orogeny_root` и `sediment_thickness` строго внутри своей плиты `p_id`
+    // 3. Двухпроходная адвекция MacCormack для корней гор, осадков, континентальности и древних швов
     {
         let plate_ids = &geology.plate_ids;
         let orogeny = &geology.orogeny_root;
         let sediment = &geology.sediment_thickness;
+        let cont_factor = &geology.continental_factor;
+        let sutures = &geology.suture_weakness;
+        let orog_age = &geology.orogen_age;
 
-        let next_orogeny = &mut scratch.next_orogeny;
-        let next_sediment = &mut scratch.next_sediment;
-
-        next_orogeny
+        // Проход 1 (Прямой полулагранжев перенос назад по характеристике `inv_step_rots`)
+        scratch
+            .next_orogeny
             .par_iter_mut()
-            .zip(next_sediment.par_iter_mut())
+            .zip(scratch.next_sediment.par_iter_mut())
+            .zip(scratch.next_density.par_iter_mut()) // используем как буфер для continental_factor
+            .zip(scratch.next_thickness.par_iter_mut()) // используем как буфер для suture_weakness
+            .zip(scratch.next_age.par_iter_mut()) // используем как буфер для orogen_age
             .enumerate()
-            .for_each(|(i, (orog_out, sed_out))| {
+            .for_each(|(i, ((((orog_1, sed_1), cont_1), sut_1), o_age_1))| {
                 let p_id = plate_ids[i];
                 let r_i = topology.cells[i].center;
                 let r_dep = inv_step_rots[p_id] * r_i;
 
-                let mut curr = i;
-                let mut best_dot = r_i.dot(r_dep);
-                for _ in 0..4 {
-                    let start = cache.edge_offsets[curr];
-                    let end = cache.edge_offsets[curr + 1];
-                    let mut next_cell = curr;
-                    for e in start..end {
-                        let nbr = cache.edge_neighbors[e];
-                        // Не перешагиваем через границы на чужую плиту
-                        if plate_ids[nbr] != p_id {
-                            continue;
-                        }
-                        let d = topology.cells[nbr].center.dot(r_dep);
-                        if d > best_dot {
-                            best_dot = d;
-                            next_cell = nbr;
-                        }
-                    }
-                    if next_cell == curr {
-                        break;
-                    }
-                    curr = next_cell;
-                }
+                let (c_a, c_b, frac) =
+                    trace_same_plate_step(i, p_id, r_dep, plate_ids, topology, cache);
 
-                let r_curr = topology.cells[curr].center;
-                let residual = r_dep - r_curr * r_curr.dot(r_dep);
-                let res_len = residual.length();
-
-                if res_len > 1e-5 {
-                    let res_dir = residual / res_len;
-                    let start = cache.edge_offsets[curr];
-                    let end = cache.edge_offsets[curr + 1];
-
-                    let mut w_sum = 0.0_f32;
-                    let mut nbr_orog = 0.0_f32;
-                    let mut nbr_sed = 0.0_f32;
-                    let mut best_align = 0.0_f32;
-                    let mut best_step_rad = cache.avg_cell_rad;
-
-                    for e in start..end {
-                        let nbr = cache.edge_neighbors[e];
-                        if plate_ids[nbr] != p_id {
-                            continue;
-                        }
-                        let align = cache.edge_tangent_dirs[e].dot(res_dir);
-                        if align > 0.0 {
-                            let w = align * align;
-                            nbr_orog += orogeny[nbr] * w;
-                            nbr_sed += sediment[nbr] * w;
-                            w_sum += w;
-
-                            if align > best_align {
-                                best_align = align;
-                                best_step_rad = cache.edge_dists_rad[e];
-                            }
-                        }
-                    }
-
-                    if w_sum > 1e-5 {
-                        let frac = (res_len / best_step_rad.max(1e-5)).clamp(0.0, 1.0);
-                        *orog_out = orogeny[curr] * (1.0 - frac) + (nbr_orog / w_sum) * frac;
-                        *sed_out = sediment[curr] * (1.0 - frac) + (nbr_sed / w_sum) * frac;
-                        return;
-                    }
-                }
-
-                *orog_out = orogeny[curr];
-                *sed_out = sediment[curr];
+                *orog_1 = orogeny[c_a] * (1.0 - frac) + orogeny[c_b] * frac;
+                *sed_1 = sediment[c_a] * (1.0 - frac) + sediment[c_b] * frac;
+                *cont_1 = cont_factor[c_a] * (1.0 - frac) + cont_factor[c_b] * frac;
+                *sut_1 = sutures[c_a] * (1.0 - frac) + sutures[c_b] * frac;
+                *o_age_1 = orog_age[c_a] * (1.0 - frac) + orog_age[c_b] * frac + dt * 0.25;
             });
+
+        // Проход 2 (Обратная проверка MacCormack вперёд по `step_rots` + антидиффузионный зажим)
+        let phi_1_orog = &scratch.next_orogeny;
+        let phi_1_sed = &scratch.next_sediment;
+        let phi_1_cont = &scratch.next_density;
+        let phi_1_sut = &scratch.next_thickness;
+        let phi_1_oage = &scratch.next_age;
+
+        let corrected: Vec<(f32, f32, f32, f32, f32)> = (0..num_cells)
+            .into_par_iter()
+            .map(|i| {
+                let p_id = plate_ids[i];
+                let r_i = topology.cells[i].center;
+                let r_dep = inv_step_rots[p_id] * r_i;
+                let r_fwd = step_rots[p_id] * r_i;
+
+                let (c_a, c_b, _) =
+                    trace_same_plate_step(i, p_id, r_dep, plate_ids, topology, cache);
+                let (f_a, f_b, f_frac) =
+                    trace_same_plate_step(i, p_id, r_fwd, plate_ids, topology, cache);
+
+                // Оценка обратного прохода
+                let back_orog = phi_1_orog[f_a] * (1.0 - f_frac) + phi_1_orog[f_b] * f_frac;
+                let back_sed = phi_1_sed[f_a] * (1.0 - f_frac) + phi_1_sed[f_b] * f_frac;
+                let back_cont = phi_1_cont[f_a] * (1.0 - f_frac) + phi_1_cont[f_b] * f_frac;
+                let back_sut = phi_1_sut[f_a] * (1.0 - f_frac) + phi_1_sut[f_b] * f_frac;
+
+                // Антидиффузионная поправка MacCormack с локальным ограничителем Min/Max
+                let min_orog = orogeny[c_a].min(orogeny[c_b]).min(orogeny[i]);
+                let max_orog = orogeny[c_a].max(orogeny[c_b]).max(orogeny[i]);
+                let corr_orog =
+                    (phi_1_orog[i] + 0.5 * (orogeny[i] - back_orog)).clamp(min_orog, max_orog);
+
+                let min_sed = sediment[c_a].min(sediment[c_b]).min(sediment[i]);
+                let max_sed = sediment[c_a].max(sediment[c_b]).max(sediment[i]);
+                let corr_sed =
+                    (phi_1_sed[i] + 0.5 * (sediment[i] - back_sed)).clamp(min_sed, max_sed);
+
+                let min_cont = cont_factor[c_a].min(cont_factor[c_b]).min(cont_factor[i]);
+                let max_cont = cont_factor[c_a].max(cont_factor[c_b]).max(cont_factor[i]);
+                let mut corr_cont =
+                    (phi_1_cont[i] + 0.5 * (cont_factor[i] - back_cont)).clamp(min_cont, max_cont);
+
+                // Поддерживаем ядро кратона от численного затухания на длинных эпохах
+                let lobe_c = craton_continental_factor(r_i, &geology.plates[p_id]);
+                corr_cont = corr_cont.max(lobe_c * 0.92).clamp(0.0, 1.0);
+
+                let min_sut = sutures[c_a].min(sutures[c_b]).min(sutures[i]);
+                let max_sut = sutures[c_a].max(sutures[c_b]).max(sutures[i]);
+                let corr_sut =
+                    (phi_1_sut[i] + 0.5 * (sutures[i] - back_sut)).clamp(min_sut, max_sut);
+
+                let corr_oage = if corr_orog < 0.05 {
+                    0.0
+                } else {
+                    phi_1_oage[i].clamp(0.0, 12.0)
+                };
+
+                (corr_orog, corr_sed, corr_cont, corr_sut, corr_oage)
+            })
+            .collect();
+
+        for (i, (o, s, c, sut, oa)) in corrected.into_iter().enumerate() {
+            geology.orogeny_root[i] = o;
+            geology.sediment_thickness[i] = s;
+            geology.continental_factor[i] = c;
+            geology.suture_weakness[i] = sut;
+            geology.orogen_age[i] = oa;
+        }
     }
 
-    geology.orogeny_root.copy_from_slice(&scratch.next_orogeny);
-    geology
-        .sediment_thickness
-        .copy_from_slice(&scratch.next_sediment);
+    // 4. Клеточная миграция границ плит (поглощение океанической коры в субдукции и рост в спрединге)
+    migrate_cell_plate_boundaries(topology, cache, geology, scratch, config, dt);
 
-    // 5. Цикл Уилсона: поглощение сжатых малых плит и раскол сверхкрупных плит
-    recycle_and_split_voronoi_plates(topology, geology, config);
+    // 5. Физический цикл Уилсона: естественное вымирание мелких плит, спаивание материков и раскол по швам
+    evolve_wilson_cycle_physical(topology, cache, geology, config);
 }
 
-fn recycle_and_split_voronoi_plates(
+/// Двигает клеточные границы `plate_ids` при субдукции и спрединге, сохраняя целостность континентальных ядер
+fn migrate_cell_plate_boundaries(
     topology: &WorldTopology,
+    cache: &TectonicsGeometryCache,
+    geology: &mut GeologyLayer,
+    scratch: &mut TectonicsScratch,
+    _config: &TectonicsConfig,
+    dt: f32,
+) {
+    let num_plates = geology.plates.len();
+    scratch.next_plate_ids.copy_from_slice(&geology.plate_ids);
+
+    let plate_ids = &geology.plate_ids;
+    let cont_factor = &geology.continental_factor;
+    let next_pids = &mut scratch.next_plate_ids;
+
+    // Фаза А: кинематический перенос границ между соседними клетками
+    next_pids.par_iter_mut().enumerate().for_each(|(i, pid_out)| {
+        let my_p = plate_ids[i];
+        if my_p >= num_plates || !geology.plates[my_p].is_alive {
+            return;
+        }
+
+        // Древнее континентальное ядро жёстко сцеплено со своей плитой и не отрывается поштучно
+        if cont_factor[i] > 0.62 {
+            return;
+        }
+
+        let start = cache.edge_offsets[i];
+        let end = cache.edge_offsets[i + 1];
+        let mut has_diff_nbr = false;
+        for e in start..end {
+            if plate_ids[cache.edge_neighbors[e]] != my_p {
+                has_diff_nbr = true;
+                break;
+            }
+        }
+        if !has_diff_nbr {
+            return;
+        }
+
+        let r_i = topology.cells[i].center;
+        let v_my = geology.plates[my_p].omega.cross(r_i);
+
+        let mut best_winner = my_p;
+        let mut best_invasion = 0.0_f32;
+
+        for e in start..end {
+            let nbr = cache.edge_neighbors[e];
+            let nbr_p = plate_ids[nbr];
+            if nbr_p == my_p || nbr_p >= num_plates || !geology.plates[nbr_p].is_alive {
+                continue;
+            }
+
+            // Вектор от соседа `nbr` к текущей клетке `i`
+            let dir_from_nbr = -cache.edge_tangent_dirs[e];
+            let step_rad = cache.edge_dists_rad[e].max(1e-4);
+            let v_nbr = geology.plates[nbr_p].omega.cross(r_i);
+
+            // Если соседняя плита является наезжающей (верхней) в зоне субдукции и движется на клетку `i`
+            let my_subducts = geology
+                .is_plate_subducting_under(my_p, nbr_p)
+                .unwrap_or(cont_factor[i] < cont_factor[nbr]);
+
+            let advance_vel = if my_subducts && cont_factor[i] < 0.45 {
+                // Наезжающая плита продвигается над жёлобом по мере погружения океанического слэба
+                v_nbr.dot(dir_from_nbr) - v_my.dot(dir_from_nbr) * 0.25
+            } else {
+                // В зоне спрединга или трансформного сдвига граница смещается со средней скоростью
+                0.5 * (v_nbr.dot(dir_from_nbr) + v_my.dot(dir_from_nbr))
+            };
+
+            let invasion_frac = (advance_vel * dt) / step_rad;
+            // Детерминированный порог фазы сетки для плавного пошагового продвижения границы
+            let cell_hash = ((i as f32 * 12.9898 + geology.sim_step as f32 * 4.1414).sin() * 43758.5)
+                .fract()
+                .abs();
+            let threshold = 0.22 + 0.55 * cell_hash;
+
+            if invasion_frac > threshold && invasion_frac > best_invasion {
+                best_invasion = invasion_frac;
+                best_winner = nbr_p;
+            }
+        }
+
+        *pid_out = best_winner;
+    });
+
+    // Фаза Б: сглаживание одиночных выступающих зубцов на границе (правило большинства соседей >= 4 из 6)
+    geology
+        .plate_ids
+        .par_iter_mut()
+        .enumerate()
+        .for_each(|(i, final_pid)| {
+            let cand_p = scratch.next_plate_ids[i];
+            let start = cache.edge_offsets[i];
+            let end = cache.edge_offsets[i + 1];
+            let deg = end - start;
+            if deg < 3 {
+                *final_pid = cand_p;
+                return;
+            }
+
+            let mut same_cnt = 0usize;
+            let mut maj_p = cand_p;
+            let mut maj_cnt = 0usize;
+
+            for e in start..end {
+                let np = scratch.next_plate_ids[cache.edge_neighbors[e]];
+                if np == cand_p {
+                    same_cnt += 1;
+                } else {
+                    let mut cnt = 0usize;
+                    for e2 in start..end {
+                        if scratch.next_plate_ids[cache.edge_neighbors[e2]] == np {
+                            cnt += 1;
+                        }
+                    }
+                    if cnt > maj_cnt {
+                        maj_cnt = cnt;
+                        maj_p = np;
+                    }
+                }
+            }
+
+            if same_cnt <= 1 && maj_cnt >= deg.saturating_sub(2) {
+                *final_pid = maj_p;
+            } else {
+                *final_pid = cand_p;
+            }
+        });
+}
+
+/// Физический цикл Уилсона без принудительного поддержания числа плит:
+/// 1) Поглощение умирающих микроплит с аккрецией их континентальных террейнов и записью шва;
+/// 2) Спаивание (Suturing) двух столкнувшихся континентальных плит при падении относительной скорости;
+/// 3) Раскол (Rifting) растянутых или перегретых мантией крупных плит вдоль древних швов (`suture_weakness`).
+fn evolve_wilson_cycle_physical(
+    topology: &WorldTopology,
+    cache: &TectonicsGeometryCache,
     geology: &mut GeologyLayer,
     config: &TectonicsConfig,
 ) {
@@ -215,298 +416,396 @@ fn recycle_and_split_voronoi_plates(
         return;
     }
 
-    let min_cells = (num_cells as f32 * config.plate_min_area_ratio) as usize;
-    let split_cells = (num_cells as f32 * config.plate_split_area_ratio) as usize;
-    if min_cells == 0 {
-        return;
-    }
-
+    let min_cells = ((num_cells as f32 * config.plate_min_area_ratio).round() as usize).max(12);
     let mut counts = vec![0usize; num_plates];
-    for &p_id in &geology.plate_ids {
+    let mut sum_dirs = vec![Vec3::ZERO; num_plates];
+
+    for (i, &p_id) in geology.plate_ids.iter().enumerate() {
         if p_id < num_plates {
             counts[p_id] += 1;
+            sum_dirs[p_id] += topology.cells[i].center;
         }
     }
 
-    let mut dying_plate = None;
-    let mut min_found = usize::MAX;
-    let mut largest_plate = 0;
-    let mut max_count = 0;
-
-    for (p_id, &c) in counts.iter().enumerate() {
-        if c > max_count {
-            max_count = c;
-            largest_plate = p_id;
-        }
-        if c < min_cells && c < min_found {
-            min_found = c;
-            dying_plate = Some(p_id);
+    for (p_id, plate) in geology.plates.iter_mut().enumerate() {
+        if counts[p_id] > 0 && sum_dirs[p_id].length_squared() > 1e-4 {
+            plate.center_dir = sum_dirs[p_id].normalize();
+            plate.is_alive = true;
+        } else {
+            plate.is_alive = false;
         }
     }
 
-    let Some(dead_id) = dying_plate else {
-        return;
-    };
-    if max_count < split_cells || largest_plate == dead_id {
-        return;
-    }
+    let alive_count = geology.plates.iter().filter(|p| p.is_alive).count();
 
-    // 1. Аккреция террейна: если у поглощаемой плиты `dead_id` был остаток континентального кратона,
-    //    припаиваем его площадь к ближайшей соседней плите, чтобы континент не исчезал бесследно.
-    let dead_plate = geology.plates[dead_id];
-    if dead_plate.craton_radius > 0.02 {
-        let dead_dir = dead_plate.center_dir;
-        if let Some(host_id) = geology
-            .plates
-            .iter()
-            .enumerate()
-            .filter(|&(idx, _)| idx != dead_id)
-            .max_by(|(_, a), (_, b)| {
-                a.center_dir.dot(dead_dir).total_cmp(&b.center_dir.dot(dead_dir))
-            })
-            .map(|(idx, _)| idx)
-        {
-            let host = &mut geology.plates[host_id];
+    // 1. Естественное поглощение субдуцировавшей малой плиты (`counts[p_id] < min_cells`)
+    if alive_count > 4 {
+        for dead_id in 0..num_plates {
+            if geology.plates[dead_id].is_alive && counts[dead_id] > 0 && counts[dead_id] < min_cells
+            {
+                // Находим соседнюю живую плиту с наибольшей общей границей
+                let mut border_hits = vec![0usize; num_plates];
+                for i in 0..num_cells {
+                    if geology.plate_ids[i] != dead_id {
+                        continue;
+                    }
+                    let start = cache.edge_offsets[i];
+                    let end = cache.edge_offsets[i + 1];
+                    for e in start..end {
+                        let np = geology.plate_ids[cache.edge_neighbors[e]];
+                        if np != dead_id && np < num_plates && geology.plates[np].is_alive {
+                            border_hits[np] += 1;
+                        }
+                    }
+                }
 
-            // Переносим активные лопасти, пока есть место
-            for k in 0..dead_plate.lobe_count as usize {
-                if (host.lobe_count as usize) >= MAX_PLATE_CRATON_LOBES { break; }
-                let lobe = dead_plate.lobes[k];
-                if lobe.radius > 1e-6 {
-                    host.lobes[host.lobe_count as usize] = lobe;
-                    host.lobe_count += 1;
+                if let Some((host_id, &hits)) =
+                    border_hits.iter().enumerate().max_by_key(|&(_, &c)| c)
+                    && hits > 0
+                {
+                    merge_plate_into_host(topology, cache, geology, dead_id, host_id);
+                    counts[host_id] += counts[dead_id];
+                    counts[dead_id] = 0;
+                    break;
                 }
             }
-            // Старые сейвы: craton_radius есть, а лопастей нет — синтезируем одну
-            if dead_plate.lobe_count == 0
-                && (host.lobe_count as usize) < MAX_PLATE_CRATON_LOBES
-            {
-                host.lobes[host.lobe_count as usize] = CratonLobe {
-                    center: dead_plate.craton_center,
-                    radius: dead_plate.craton_radius,
-                    seed_offset: dead_plate.seed_offset,
-                };
-                host.lobe_count += 1;
+        }
+    }
+
+    // 2. Спаивание (Suturing) двух континентальных плит, затормозивших при лобовом столкновении
+    if geology.sim_step.is_multiple_of(6) && alive_count > 5 {
+        let mut suture_pair: Option<(usize, usize)> = None;
+        'outer: for p1 in 0..num_plates {
+            if !geology.plates[p1].is_alive || geology.plates[p1].craton_radius <= 0.05 {
+                continue;
             }
+            for p2 in (p1 + 1)..num_plates {
+                if !geology.plates[p2].is_alive || geology.plates[p2].craton_radius <= 0.05 {
+                    continue;
+                }
+                let rel_omega = (geology.plates[p1].omega - geology.plates[p2].omega).length();
+                if rel_omega > config.angular_vel_min * 0.52 {
+                    continue;
+                }
 
-            host.recompute_craton_from_lobes();
-            host.craton_radius = host.craton_radius.min(0.65); // сохраняем прежний кап
+                // Проверяем, сколько континентальных клеток двух плит соприкасаются напрямую
+                let mut cont_contact = 0usize;
+                for i in 0..num_cells {
+                    if geology.plate_ids[i] != p1 || geology.continental_factor[i] < 0.45 {
+                        continue;
+                    }
+                    let start = cache.edge_offsets[i];
+                    let end = cache.edge_offsets[i + 1];
+                    for e in start..end {
+                        let nbr = cache.edge_neighbors[e];
+                        if geology.plate_ids[nbr] == p2 && geology.continental_factor[nbr] > 0.45 {
+                            cont_contact += 1;
+                            break;
+                        }
+                    }
+                }
+
+                if cont_contact >= 18 {
+                    suture_pair = Some((p1, p2));
+                    break 'outer;
+                }
+            }
+        }
+
+        if let Some((p1, p2)) = suture_pair {
+            let (host_id, dead_id) = if counts[p1] >= counts[p2] {
+                (p1, p2)
+            } else {
+                (p2, p1)
+            };
+            merge_plate_into_host(topology, cache, geology, dead_id, host_id);
+            counts[host_id] += counts[dead_id];
+            counts[dead_id] = 0;
         }
     }
 
-    // 2. Определяем направление рифта по ближайшему к `largest_plate` мантийному плюму
-    let parent = geology.plates[largest_plate];
-    let split_dir = geology
-        .plumes
-        .iter()
-        .map(|pl| pl.position)
-        .filter(|&pos| pos.dot(parent.center_dir) > 0.25)
-        .min_by(|a, b| {
-            let da = a.dot(parent.center_dir).clamp(-1.0, 1.0).acos();
-            let db = b.dot(parent.center_dir).clamp(-1.0, 1.0).acos();
-            da.total_cmp(&db)
-        })
-        .unwrap_or_else(|| {
-            parent
-                .euler_pole
-                .cross(parent.center_dir)
-                .normalize_or_zero()
-        });
+    // 3. Детерминированный раскол плиты от внутреннего натяжения (`internal_tension`) и перегрева (`mantle_heat`)
+    let free_slot = geology.plates.iter().position(|p| !p.is_alive);
+    if let Some(child_id) = free_slot {
+        let min_split_cells = (num_cells as f32 * config.plate_split_area_ratio * 0.75) as usize;
+        let mut fracture_candidate: Option<(usize, f32)> = None;
 
-    let tangent =
-        (split_dir - parent.center_dir * parent.center_dir.dot(split_dir)).normalize_or_zero();
-    if tangent == Vec3::ZERO {
-        return;
-    }
-
-    // 3. Разводим центры Вороного и раскалываем кратон на два отдельных фрагмента по разные стороны рифта
-    let sep_angle = 0.14_f32;
-    let new_parent_center =
-        (parent.center_dir * sep_angle.cos() - tangent * sep_angle.sin()).normalize_or_zero();
-    let new_child_center =
-        (parent.center_dir * sep_angle.cos() + tangent * sep_angle.sin()).normalize_or_zero();
-
-    let (parent_lobes, parent_lobe_count, child_lobes, child_lobe_count) =
-    split_craton_lobes(&parent, tangent);
-
-    let rot_parent = Quat::from_rotation_arc(parent.center_dir, new_parent_center);
-    let rot_child = Quat::from_rotation_arc(parent.center_dir, new_child_center);
-
-    // Задаём расходящиеся импульсы скорости обеим половинам расколовшейся плиты
-    let kick_pole = parent.center_dir.cross(tangent).normalize_or_zero();
-    let kick_mag = config.angular_vel_min * 0.45;
-
-    let parent_omega = parent.omega - kick_pole * kick_mag;
-    let parent_speed = parent_omega
-        .length()
-        .clamp(config.angular_vel_min, config.angular_vel_max);
-    let parent_pole = if parent_omega.length() > 1e-4 {
-        parent_omega.normalize()
-    } else {
-        parent.euler_pole
-    };
-
-    {
-        let p = &mut geology.plates[largest_plate];
-        p.center_dir  = new_parent_center;
-        p.euler_pole  = parent_pole;
-        p.angular_vel = parent_speed;
-        p.omega       = parent_pole * parent_speed;
-        p.accum_rot   = rot_parent * parent.accum_rot;
-
-        p.lobes      = parent_lobes;
-        p.lobe_count = parent_lobe_count;
-        // Лопасти были в старой системе `parent.center_dir` — доворачиваем
-        for k in 0..p.lobe_count as usize {
-            p.lobes[k].center = rot_parent * p.lobes[k].center;
+        for (p_id, plate) in geology.plates.iter().enumerate() {
+            if !plate.is_alive || counts[p_id] < min_split_cells.max(min_cells * 3) {
+                continue;
+            }
+            // Эффективная нагрузка разрыва складывается из механического натяжения краёв и теплового ослабления снизу
+            let stress_load = plate.internal_tension + plate.mantle_heat * 0.75;
+            if stress_load > config.plate_fracture_threshold {
+                if fracture_candidate.is_none_or(|(_, best_s)| stress_load > best_s) {
+                    fracture_candidate = Some((p_id, stress_load));
+                }
+            }
         }
-        p.recompute_craton_from_lobes();
 
-        // Раскол сбрасывает часть накоплений
-        p.tension_axis = rot_parent * parent.tension_axis;
-        p.internal_tension *= 0.5;
-        p.mantle_heat      *= 0.6;
-        p.is_alive          = true;
-    }
-
-    let child_omega = parent.omega + kick_pole * kick_mag;
-    let child_speed = child_omega
-        .length()
-        .clamp(config.angular_vel_min, config.angular_vel_max);
-    let child_pole = if child_omega.length() > 1e-4 {
-        child_omega.normalize()
-    } else {
-        parent.euler_pole
-    };
-
-    let old_hue = geology.plates[dead_id].color_hue; // читаем ДО перезаписи слота
-
-    let mut child = Plate {
-        center_dir:  new_child_center,
-        euler_pole:  child_pole,
-        angular_vel: child_speed,
-        omega:       child_pole * child_speed,
-        accum_rot:   rot_child * parent.accum_rot,
-        base_elevation_offset: parent.base_elevation_offset,
-
-        // Эти два поля перезапишет recompute_craton_from_lobes — временные значения
-        craton_center: new_child_center,
-        craton_radius: 0.0,
-
-        lobes:      child_lobes,
-        lobe_count: child_lobe_count,
-
-        seed_offset: parent.seed_offset + 17.3,
-        color_hue:   old_hue,
-
-        tension_axis: rot_child * parent.tension_axis,
-        internal_tension: 0.0,
-        mantle_heat:      0.0,
-        is_alive:         true,
-    };
-
-    for k in 0..child.lobe_count as usize {
-        child.lobes[k].center = rot_child * child.lobes[k].center;
-        child.lobes[k].seed_offset += 11.9; // немного разные шумовые паттерны у фрагментов
-    }
-    child.recompute_craton_from_lobes();
-
-    geology.plates[dead_id] = child;
-
-    let n = geology.plates.len();
-    for other in 0..n {
-        if other == dead_id { continue; }
-        let row = dead_id * n + other;
-        let col = other * n + dead_id;
-        if row < geology.subduction_polarity.len() { geology.subduction_polarity[row] = 0; }
-        if col < geology.subduction_polarity.len() { geology.subduction_polarity[col] = 0; }
-    }
-
-    // 4. Перепривязываем вулканы к актуальным плитам, чтобы вулканы старой `dead_id`
-    //    и расколовшейся `largest_plate` вращались со своей физической плитой
-    let warp_scale = config.warp_scale as f32;
-    let warp_strength = config.warp_strength;
-    for v in &mut geology.volcanoes {
-        if v.plate_id == dead_id || v.plate_id == largest_plate {
-            let warped_v = fast_domain_warp(v.center, warp_scale, warp_strength);
-            let (new_p_id, _, _, _, _) =
-                find_closest_plates_and_boundary_dists(warped_v, &geology.plates);
-            v.plate_id = new_p_id;
+        if let Some((parent_id, _)) = fracture_candidate {
+            rupture_plate_along_weak_zone(topology, cache, geology, config, parent_id, child_id);
         }
     }
 }
 
-fn split_craton_lobes(
-    parent: &Plate,
-    tangent: Vec3,
-) -> (
-    [CratonLobe; MAX_PLATE_CRATON_LOBES], u8,
-    [CratonLobe; MAX_PLATE_CRATON_LOBES], u8,
+/// Присоединяет клетки и кратонные ядра плиты `dead_id` к `host_id`, консервируя шов как древнюю сутуру
+fn merge_plate_into_host(
+    topology: &WorldTopology,
+    cache: &TectonicsGeometryCache,
+    geology: &mut GeologyLayer,
+    dead_id: usize,
+    host_id: usize,
 ) {
-    let mut p = [CratonLobe::default(); MAX_PLATE_CRATON_LOBES];
-    let mut pc = 0u8;
-    let mut c = [CratonLobe::default(); MAX_PLATE_CRATON_LOBES];
-    let mut cc = 0u8;
+    let num_cells = topology.cells.len();
 
-    // Старые сейвы: craton_radius задан, а лопастей нет — синтезируем одну «виртуальную»
-    let mut src = [CratonLobe::default(); MAX_PLATE_CRATON_LOBES];
-    let src_n: usize = if parent.lobe_count > 0 {
-        let n = (parent.lobe_count as usize).min(MAX_PLATE_CRATON_LOBES);
-        src[..n].copy_from_slice(&parent.lobes[..n]);
-        n
-    } else if parent.craton_radius > 0.04 {
-        src[0] = CratonLobe {
-            center: parent.craton_center,
-            radius: parent.craton_radius,
-            seed_offset: parent.seed_offset,
-        };
-        1
-    } else {
-        0
-    };
-
-    // Проход 1: каждая лопасть уходит на ту сторону рифта, куда смотрит её центр
-    for k in 0..src_n {
-        let lobe = src[k];
-        if lobe.radius <= 1e-6 { continue; }
-        if lobe.center.dot(tangent) >= 0.0 {
-            if (cc as usize) < MAX_PLATE_CRATON_LOBES { c[cc as usize] = lobe; cc += 1; }
-        } else if (pc as usize) < MAX_PLATE_CRATON_LOBES { p[pc as usize] = lobe; pc += 1; }
-    }
-
-    // Проход 2: если одна из сторон пустая — раскалываем крупнейшую лопасть
-    // (сохранение площади: 2·(r/√2)² = r²)
-    if src_n > 0 && (pc == 0) ^ (cc == 0) {
-        let (big, big_idx, from_parent) = if pc > 0 {
-            let i = (0..pc as usize)
-                .max_by(|&a, &b| p[a].radius.total_cmp(&p[b].radius)).unwrap();
-            (p[i], i, true)
-        } else {
-            let i = (0..cc as usize)
-                .max_by(|&a, &b| c[a].radius.total_cmp(&c[b].radius)).unwrap();
-            (c[i], i, false)
-        };
-        let ct = (tangent - big.center * big.center.dot(tangent)).normalize_or_zero();
-        if ct != Vec3::ZERO {
-            let sep = (big.radius * 0.48).clamp(0.05, 0.28);
-            let a = (big.center * sep.cos() - ct * sep.sin()).normalize_or_zero();
-            let b = (big.center * sep.cos() + ct * sep.sin()).normalize_or_zero();
-            let frag = big.radius * std::f32::consts::FRAC_1_SQRT_2;
-            if from_parent {
-                p[big_idx] = CratonLobe { center: a, radius: frag, seed_offset: big.seed_offset };
-                if (cc as usize) < MAX_PLATE_CRATON_LOBES {
-                    c[cc as usize] = CratonLobe { center: b, radius: frag, seed_offset: big.seed_offset + 3.7 };
-                    cc += 1;
+    // 1. Все пограничные клетки между `dead_id` и `host_id` становятся древним швом (`suture_weakness`)
+    for i in 0..num_cells {
+        let p = geology.plate_ids[i];
+        if p != dead_id && p != host_id {
+            continue;
+        }
+        let start = cache.edge_offsets[i];
+        let end = cache.edge_offsets[i + 1];
+        for e in start..end {
+            let np = geology.plate_ids[cache.edge_neighbors[e]];
+            if (p == dead_id && np == host_id) || (p == host_id && np == dead_id) {
+                geology.suture_weakness[i] = geology.suture_weakness[i].max(0.88);
+                if geology.continental_factor[i] > 0.35 {
+                    geology.orogeny_root[i] = geology.orogeny_root[i].max(0.55);
                 }
-            } else {
-                c[big_idx] = CratonLobe { center: b, radius: frag, seed_offset: big.seed_offset };
-                if (pc as usize) < MAX_PLATE_CRATON_LOBES {
-                    p[pc as usize] = CratonLobe { center: a, radius: frag, seed_offset: big.seed_offset + 3.7 };
-                    pc += 1;
-                }
+                break;
             }
         }
     }
 
-    (p, pc, c, cc)
+    // 2. Переносим клетки и вулканы на `host_id`
+    for pid in &mut geology.plate_ids {
+        if *pid == dead_id {
+            *pid = host_id;
+        }
+    }
+    for v in &mut geology.volcanoes {
+        if v.plate_id == dead_id {
+            v.plate_id = host_id;
+        }
+    }
+
+    // 3. Переносим кратонные ядра (`lobes`) из `dead_id` в `host_id`
+    let dead_plate = geology.plates[dead_id];
+    let host_plate = &mut geology.plates[host_id];
+
+    let rot_to_host = host_plate.accum_rot * dead_plate.accum_rot.inverse();
+    let dead_cnt = (dead_plate.lobe_count as usize).min(MAX_PLATE_CRATON_LOBES);
+    for l_idx in 0..dead_cnt {
+        let dl = dead_plate.lobes[l_idx];
+        if dl.radius <= 1e-4 {
+            continue;
+        }
+        if (host_plate.lobe_count as usize) < MAX_PLATE_CRATON_LOBES {
+            let dst = host_plate.lobe_count as usize;
+            host_plate.lobes[dst] = CratonLobe {
+                center: dl.center,
+                radius: dl.radius,
+                seed_offset: dl.seed_offset,
+            };
+            host_plate.lobe_count += 1;
+        } else {
+            // Если все 4 слота заняты, укрупняем ближайшее ядро
+            let mut best_k = 0;
+            let mut best_d = -2.0_f32;
+            for k in 0..MAX_PLATE_CRATON_LOBES {
+                let d = host_plate.lobes[k].center.dot(dl.center);
+                if d > best_d {
+                    best_d = d;
+                    best_k = k;
+                }
+            }
+            host_plate.lobes[best_k].radius =
+                (host_plate.lobes[best_k].radius.powi(2) + dl.radius.powi(2))
+                    .sqrt()
+                    .min(0.65);
+        }
+    }
+    let _ = rot_to_host;
+
+    host_plate.craton_radius = (host_plate.craton_radius.powi(2) + dead_plate.craton_radius.powi(2))
+        .sqrt()
+        .min(0.85);
+    geology.plates[dead_id].is_alive = false;
+    geology.plates[dead_id].angular_vel = 0.0;
+    geology.plates[dead_id].omega = Vec3::ZERO;
+}
+
+/// Раскалывает плиту `parent_id` вдоль оси растяжения с притяжением линии разлома к древним швам и плюмам
+fn rupture_plate_along_weak_zone(
+    topology: &WorldTopology,
+    cache: &TectonicsGeometryCache,
+    geology: &mut GeologyLayer,
+    config: &TectonicsConfig,
+    parent_id: usize,
+    child_id: usize,
+) {
+    let num_cells = topology.cells.len();
+    let parent = geology.plates[parent_id];
+
+    // 1. Ищем центр зарождения рифта внутри плиты: клетку с максимальной суммой `suture_weakness` и близости к плюму
+    let mut pivot_dir = parent.craton_center;
+    let mut best_weak_score = -1.0_f32;
+
+    for i in 0..num_cells {
+        if geology.plate_ids[i] != parent_id {
+            continue;
+        }
+        let r_i = topology.cells[i].center;
+        let mut score = geology.suture_weakness[i] * 2.0 + geology.continental_factor[i] * 0.35;
+        for pl in &geology.plumes {
+            let d = r_i.dot(pl.position).clamp(-1.0, 1.0).acos();
+            if d < pl.radius * 3.5 {
+                score += (1.0 - d / (pl.radius * 3.5)) * 1.8;
+            }
+        }
+        if score > best_weak_score {
+            best_weak_score = score;
+            pivot_dir = r_i;
+        }
+    }
+
+    // Нормаль к плоскости разрыва ориентирована вдоль главной оси растяжения `parent.tension_axis`
+    let mut split_normal =
+        (parent.tension_axis - pivot_dir * pivot_dir.dot(parent.tension_axis)).normalize_or_zero();
+    if split_normal == Vec3::ZERO {
+        split_normal = parent.euler_pole.cross(pivot_dir).normalize_or_zero();
+    }
+    if split_normal == Vec3::ZERO {
+        return;
+    }
+
+    // 2. Делим клетки плиты по извилистой поверхности разлома, притягивающейся к `suture_weakness`
+    let mut parent_sum = Vec3::ZERO;
+    let mut child_sum = Vec3::ZERO;
+    let mut parent_cnt = 0usize;
+    let mut child_cnt = 0usize;
+
+    for i in 0..num_cells {
+        if geology.plate_ids[i] != parent_id {
+            continue;
+        }
+        let r_i = topology.cells[i].center;
+        // Небольшой 3D-шум + отклонение вдоль слабых зон делает линию рифта геологической, а не прямой
+        let s = parent.seed_offset;
+        let warp = (r_i.x * 4.2 + s).sin() * (r_i.y * 3.9 - s).cos() * 0.06
+            + (r_i.z * 7.1 + r_i.x * 6.3).sin() * 0.03;
+        let side = (r_i - pivot_dir).dot(split_normal) + warp;
+
+        if side > 0.0 {
+            geology.plate_ids[i] = child_id;
+            child_sum += r_i;
+            child_cnt += 1;
+        } else {
+            parent_sum += r_i;
+            parent_cnt += 1;
+        }
+
+        // Вдоль самого молодого рифта повышаем слабость коры
+        if side.abs() < 0.045 {
+            geology.suture_weakness[i] = geology.suture_weakness[i].max(0.75);
+        }
+    }
+
+    // Если разрез прошёл слишком близко к краю, отменяем холостой раскол
+    if parent_cnt < 20 || child_cnt < 20 {
+        for pid in &mut geology.plate_ids {
+            if *pid == child_id {
+                *pid = parent_id;
+            }
+        }
+        return;
+    }
+
+    let new_parent_center = parent_sum.normalize_or_zero();
+    let new_child_center = child_sum.normalize_or_zero();
+
+    // 3. Распределяем кратонные ядра (`lobes`) между двумя разошедшимися половинами щита
+    let mut parent_lobes = [CratonLobe::default(); MAX_PLATE_CRATON_LOBES];
+    let mut child_lobes = [CratonLobe::default(); MAX_PLATE_CRATON_LOBES];
+    let mut p_lobe_cnt = 0usize;
+    let mut c_lobe_cnt = 0usize;
+
+    let orig_cnt = (parent.lobe_count as usize).min(MAX_PLATE_CRATON_LOBES);
+    for l_idx in 0..orig_cnt {
+        let lobe = parent.lobes[l_idx];
+        if lobe.radius <= 1e-4 {
+            continue;
+        }
+        if (lobe.center - pivot_dir).dot(split_normal) > 0.0 {
+            child_lobes[c_lobe_cnt] = lobe;
+            c_lobe_cnt += 1;
+        } else {
+            parent_lobes[p_lobe_cnt] = lobe;
+            p_lobe_cnt += 1;
+        }
+    }
+
+    // 4. Задаём расходящийся импульс угловой скорости обеим дочерним плитам от оси рифта
+    let kick_pole = pivot_dir.cross(split_normal).normalize_or_zero();
+    let kick_mag = config.angular_vel_min * 0.55;
+
+    let p_omega = parent.omega - kick_pole * kick_mag;
+    let p_speed = p_omega
+        .length()
+        .clamp(config.angular_vel_min, config.angular_vel_max);
+    let p_pole = if p_omega.length() > 1e-4 {
+        p_omega.normalize()
+    } else {
+        parent.euler_pole
+    };
+
+    geology.plates[parent_id].center_dir = new_parent_center;
+    geology.plates[parent_id].euler_pole = p_pole;
+    geology.plates[parent_id].angular_vel = p_speed;
+    geology.plates[parent_id].omega = p_pole * p_speed;
+    geology.plates[parent_id].lobes = parent_lobes;
+    geology.plates[parent_id].lobe_count = p_lobe_cnt as u8;
+    geology.plates[parent_id].internal_tension = 0.0;
+    geology.plates[parent_id].mantle_heat *= 0.35;
+
+    let c_omega = parent.omega + kick_pole * kick_mag;
+    let c_speed = c_omega
+        .length()
+        .clamp(config.angular_vel_min, config.angular_vel_max);
+    let c_pole = if c_omega.length() > 1e-4 {
+        c_omega.normalize()
+    } else {
+        parent.euler_pole
+    };
+
+    let child_hue = ((geology.plates[child_id].color_hue + 137.5) % 360.0).clamp(0.0, 360.0);
+    geology.plates[child_id] = Plate {
+        center_dir: new_child_center,
+        euler_pole: c_pole,
+        angular_vel: c_speed,
+        omega: c_pole * c_speed,
+        accum_rot: parent.accum_rot,
+        base_elevation_offset: parent.base_elevation_offset,
+        craton_center: new_child_center,
+        craton_radius: parent.craton_radius * 0.70,
+        lobes: child_lobes,
+        lobe_count: c_lobe_cnt as u8,
+        seed_offset: parent.seed_offset + 19.7,
+        color_hue: child_hue,
+        tension_axis: split_normal,
+        internal_tension: 0.0,
+        mantle_heat: parent.mantle_heat * 0.35,
+        is_alive: true,
+    };
+
+    // Перепривязываем вулканы на отколовшейся половине к `child_id`
+    for v in &mut geology.volcanoes {
+        if v.plate_id == parent_id && (v.center - pivot_dir).dot(split_normal) > 0.0 {
+            v.plate_id = child_id;
+        }
+    }
+
+    let _ = cache;
 }
