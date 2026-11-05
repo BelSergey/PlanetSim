@@ -21,26 +21,28 @@ fn trace_same_plate_step(
     plate_ids: &[usize],
     topology: &WorldTopology,
     cache: &TectonicsGeometryCache,
-) -> (usize, usize, f32) {
+) -> (usize, usize, usize, f32, f32) {
     let mut curr = start_cell;
     let mut best_dot = topology.cells[curr].center.dot(r_target);
 
+    // Шагаем только если до цели больше ~1 радиуса клетки и луч не упёрся в чужую плиту
+    let cos_step = cache.avg_cell_rad.cos();
     for _ in 0..4 {
+        if best_dot >= cos_step {
+            break;
+        }
         let start = cache.edge_offsets[curr];
         let end = cache.edge_offsets[curr + 1];
         let mut next_cell = curr;
         for e in start..end {
             let nbr = cache.edge_neighbors[e];
-            if plate_ids[nbr] != p_id {
-                continue;
-            }
             let d = topology.cells[nbr].center.dot(r_target);
             if d > best_dot {
                 best_dot = d;
                 next_cell = nbr;
             }
         }
-        if next_cell == curr {
+        if next_cell == curr || plate_ids[next_cell] != p_id {
             break;
         }
         curr = next_cell;
@@ -54,30 +56,53 @@ fn trace_same_plate_step(
         let res_dir = residual / res_len;
         let start = cache.edge_offsets[curr];
         let end = cache.edge_offsets[curr + 1];
-        let mut best_nbr = curr;
-        let mut best_align = 0.0_f32;
-        let mut best_step_rad = cache.avg_cell_rad;
+
+        // Ищем 2 лучших ребра, образующих 60-градусный сектор вокруг `res_dir`
+        let (mut n1, mut a1, mut step1) = (curr, 0.0_f32, cache.avg_cell_rad);
+        let (mut n2, mut a2, mut step2) = (curr, 0.0_f32, cache.avg_cell_rad);
+        let mut max_any_align = 0.0_f32;
+        let mut best_any_same_plate = true;
 
         for e in start..end {
             let nbr = cache.edge_neighbors[e];
+            let align = cache.edge_tangent_dirs[e].dot(res_dir);
+            if align > max_any_align {
+                max_any_align = align;
+                best_any_same_plate = plate_ids[nbr] == p_id;
+            }
             if plate_ids[nbr] != p_id {
                 continue;
             }
-            let align = cache.edge_tangent_dirs[e].dot(res_dir);
-            if align > best_align {
-                best_align = align;
-                best_nbr = nbr;
-                best_step_rad = cache.edge_dists_rad[e];
+            if align > a1 {
+                n2 = n1;
+                a2 = a1;
+                step2 = step1;
+                n1 = nbr;
+                a1 = align;
+                step1 = cache.edge_dists_rad[e];
+            } else if align > a2 {
+                n2 = nbr;
+                a2 = align;
+                step2 = cache.edge_dists_rad[e];
             }
         }
 
-        if best_nbr != curr && best_align > 0.15 {
-            let frac = ((res_len * best_align) / best_step_rad.max(1e-5)).clamp(0.0, 1.0);
-            return (curr, best_nbr, frac);
+        // Если главное геометрическое направление упирается в чужую плиту — не скользим вбок вдоль шва
+        if best_any_same_plate && n1 != curr && a1 > 0.35 {
+            let w_dir1 = (a1 - 0.42).max(0.01);
+            let w_dir2 = if n2 != curr { (a2 - 0.42).max(0.0) } else { 0.0 };
+            let w_sum = w_dir1 + w_dir2;
+            let s1 = w_dir1 / w_sum;
+            let s2 = w_dir2 / w_sum;
+
+            let eff_align = a1 * s1 + a2 * s2;
+            let eff_step = (step1 * s1 + step2 * s2).max(1e-5);
+            let frac = ((res_len * eff_align) / eff_step).clamp(0.0, 1.0);
+            return (curr, n1, n2, frac * s1, frac * s2);
         }
     }
 
-    (curr, curr, 0.0)
+    (curr, curr, curr, 0.0, 0.0)
 }
 
 pub fn advect_crust_and_plates(
@@ -157,7 +182,7 @@ pub fn advect_crust_and_plates(
     let min_volcano_h = config.hotspot_height_min * 0.14;
     geology.volcanoes.retain(|v| v.height > min_volcano_h);
 
-    // 3. Двухпроходная адвекция MacCormack для корней гор, осадков, континентальности и древних швов
+    // 3. Двухпроходная адвекция MacCormack с 2D-секторной интерполяцией
     {
         let plate_ids = &geology.plate_ids;
         let orogeny = &geology.orogeny_root;
@@ -166,31 +191,33 @@ pub fn advect_crust_and_plates(
         let sutures = &geology.suture_weakness;
         let orog_age = &geology.orogen_age;
 
-        // Проход 1 (Прямой полулагранжев перенос назад по характеристике `inv_step_rots`)
+        // Проход 1 (Прямой полулагранжев перенос назад по `inv_step_rots`)
         scratch
             .next_orogeny
             .par_iter_mut()
             .zip(scratch.next_sediment.par_iter_mut())
-            .zip(scratch.next_density.par_iter_mut()) // используем как буфер для continental_factor
-            .zip(scratch.next_thickness.par_iter_mut()) // используем как буфер для suture_weakness
-            .zip(scratch.next_age.par_iter_mut()) // используем как буфер для orogen_age
+            .zip(scratch.next_density.par_iter_mut())
+            .zip(scratch.next_thickness.par_iter_mut())
+            .zip(scratch.next_age.par_iter_mut())
             .enumerate()
             .for_each(|(i, ((((orog_1, sed_1), cont_1), sut_1), o_age_1))| {
                 let p_id = plate_ids[i];
                 let r_i = topology.cells[i].center;
                 let r_dep = inv_step_rots[p_id] * r_i;
 
-                let (c_a, c_b, frac) =
+                let (c0, c1, c2, w1, w2) =
                     trace_same_plate_step(i, p_id, r_dep, plate_ids, topology, cache);
+                let w0 = 1.0 - w1 - w2;
+                let bilerp = |arr: &[f32]| arr[c0] * w0 + arr[c1] * w1 + arr[c2] * w2;
 
-                *orog_1 = orogeny[c_a] * (1.0 - frac) + orogeny[c_b] * frac;
-                *sed_1 = sediment[c_a] * (1.0 - frac) + sediment[c_b] * frac;
-                *cont_1 = cont_factor[c_a] * (1.0 - frac) + cont_factor[c_b] * frac;
-                *sut_1 = sutures[c_a] * (1.0 - frac) + sutures[c_b] * frac;
-                *o_age_1 = orog_age[c_a] * (1.0 - frac) + orog_age[c_b] * frac + dt * 0.25;
+                *orog_1 = bilerp(orogeny);
+                *sed_1 = bilerp(sediment);
+                *cont_1 = bilerp(cont_factor);
+                *sut_1 = bilerp(sutures);
+                *o_age_1 = bilerp(orog_age) + dt * 0.25;
             });
 
-        // Проход 2 (Обратная проверка MacCormack вперёд по `step_rots` + антидиффузионный зажим)
+        // Проход 2 (Обратная проверка MacCormack вперёд по `step_rots` + 2D-зажим)
         let phi_1_orog = &scratch.next_orogeny;
         let phi_1_sed = &scratch.next_sediment;
         let phi_1_cont = &scratch.next_density;
@@ -205,41 +232,28 @@ pub fn advect_crust_and_plates(
                 let r_dep = inv_step_rots[p_id] * r_i;
                 let r_fwd = step_rots[p_id] * r_i;
 
-                let (c_a, c_b, _) =
+                let (c0, c1, c2, _, _) =
                     trace_same_plate_step(i, p_id, r_dep, plate_ids, topology, cache);
-                let (f_a, f_b, f_frac) =
+                let (f0, f1, f2, fw1, fw2) =
                     trace_same_plate_step(i, p_id, r_fwd, plate_ids, topology, cache);
+                let fw0 = 1.0 - fw1 - fw2;
 
-                // Оценка обратного прохода
-                let back_orog = phi_1_orog[f_a] * (1.0 - f_frac) + phi_1_orog[f_b] * f_frac;
-                let back_sed = phi_1_sed[f_a] * (1.0 - f_frac) + phi_1_sed[f_b] * f_frac;
-                let back_cont = phi_1_cont[f_a] * (1.0 - f_frac) + phi_1_cont[f_b] * f_frac;
-                let back_sut = phi_1_sut[f_a] * (1.0 - f_frac) + phi_1_sut[f_b] * f_frac;
+                // Если прямой или обратный луч упёрся в границу плиты, отключаем антидиффузию MacCormack
+                let mc = if c1 == c0 || f1 == f0 { 0.0 } else { 0.45 };
 
-                // Антидиффузионная поправка MacCormack с локальным ограничителем Min/Max
-                let min_orog = orogeny[c_a].min(orogeny[c_b]).min(orogeny[i]);
-                let max_orog = orogeny[c_a].max(orogeny[c_b]).max(orogeny[i]);
-                let corr_orog =
-                    (phi_1_orog[i] + 0.5 * (orogeny[i] - back_orog)).clamp(min_orog, max_orog);
+                let correct_field = |orig: &[f32], phi1: &[f32]| -> f32 {
+                    let back = phi1[f0] * fw0 + phi1[f1] * fw1 + phi1[f2] * fw2;
+                    let lo = orig[c0].min(orig[c1]).min(orig[c2]).min(orig[i]);
+                    let hi = orig[c0].max(orig[c1]).max(orig[c2]).max(orig[i]);
+                    (phi1[i] + mc * (orig[i] - back)).clamp(lo, hi)
+                };
 
-                let min_sed = sediment[c_a].min(sediment[c_b]).min(sediment[i]);
-                let max_sed = sediment[c_a].max(sediment[c_b]).max(sediment[i]);
-                let corr_sed =
-                    (phi_1_sed[i] + 0.5 * (sediment[i] - back_sed)).clamp(min_sed, max_sed);
-
-                let min_cont = cont_factor[c_a].min(cont_factor[c_b]).min(cont_factor[i]);
-                let max_cont = cont_factor[c_a].max(cont_factor[c_b]).max(cont_factor[i]);
-                let mut corr_cont =
-                    (phi_1_cont[i] + 0.5 * (cont_factor[i] - back_cont)).clamp(min_cont, max_cont);
-
-                // Поддерживаем ядро кратона от численного затухания на длинных эпохах
+                let corr_orog = correct_field(orogeny, phi_1_orog);
+                let corr_sed = correct_field(sediment, phi_1_sed);
+                let mut corr_cont = correct_field(cont_factor, phi_1_cont);
                 let lobe_c = craton_continental_factor(r_i, &geology.plates[p_id]);
                 corr_cont = corr_cont.max(lobe_c * 0.92).clamp(0.0, 1.0);
-
-                let min_sut = sutures[c_a].min(sutures[c_b]).min(sutures[i]);
-                let max_sut = sutures[c_a].max(sutures[c_b]).max(sutures[i]);
-                let corr_sut =
-                    (phi_1_sut[i] + 0.5 * (sutures[i] - back_sut)).clamp(min_sut, max_sut);
+                let corr_sut = correct_field(sutures, phi_1_sut);
 
                 let corr_oage = if corr_orog < 0.05 {
                     0.0
