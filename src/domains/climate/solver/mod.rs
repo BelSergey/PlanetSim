@@ -1,5 +1,7 @@
 // src/domains/climate/solver/mod.rs
 
+use std::collections::HashMap;
+
 use bevy::math::Vec3;
 use noise::{Fbm, NoiseFn, Perlin};
 use rayon::prelude::*;
@@ -353,11 +355,11 @@ impl ClimateSolverCache {
         }
     }
 
-    /// Явно сбрасывает `SolverPrecalc`. Вызывайте, если изменились
-    /// `topology`, `geology.continentality`, `geology.elevations` или `config`.
-    pub fn invalidate_precalc(&mut self) {
-        self.precalc = None;
-    }
+    // Явно сбрасывает `SolverPrecalc`. Вызывайте, если изменились
+    // `topology`, `geology.continentality`, `geology.elevations` или `config`.
+    // pub fn invalidate_precalc(&mut self) {
+    //     self.precalc = None;
+    // }
 }
 
 impl Default for ClimateSolverCache {
@@ -487,9 +489,9 @@ pub fn simulate_all_seasons(
 
     logger.start_step("Климат: индексация 3D-стрелок ветров и течений...");
     for snap in [spring, summer, winter] {
-        snap.wind_arrows_cache = build_arrow_cache(topology, &snap.winds_3d, None, 35);
+        snap.wind_arrows_cache = build_arrow_cache(topology, &snap.winds_3d, None, 350);
         snap.current_arrows_cache =
-            build_arrow_cache(topology, &snap.ocean_currents, Some(geology), 35);
+            build_arrow_cache(topology, &snap.ocean_currents, Some(geology), 350);
     }
 
     climate.apply_active_season(config.active_season);
@@ -604,7 +606,7 @@ fn simulate_single_season(
     let mut current_speed = vec![0.0f32; num_cells];
 
     let ref_current_speed = (1.5 * config.ocean_current_speed_multiplier).max(0.05);
-    let ocean_advection_max = config.ocean_advection_rate.min(0.85);
+    let ocean_advection_max = config.ocean_advection_rate.min(0.99);
 
     // --- 4. Цикл равновесия ---
     let iterations = config.equilibrium_iterations.max(1);
@@ -728,7 +730,7 @@ fn simulate_single_season(
                 }
                 let incoming = upwind / total_ocean[i];
                 let norm_speed = (current_speed[i] / ref_current_speed).clamp(0.0, 1.0);
-                let step_rate = norm_speed * ocean_advection_max;
+                let step_rate: f32 = norm_speed * ocean_advection_max;
                 *o = prev[i] * (1.0 - step_rate) + incoming * step_rate;
             });
         }
@@ -776,7 +778,7 @@ fn simulate_single_season(
 
         // Ж) Радиационный баланс
         let air_blend = (config.heat_advection_strength * 0.55).clamp(0.0, 0.85);
-        let ocean_blend = config.ocean_advection_rate.clamp(0.0, 0.85);
+        let ocean_blend = config.ocean_advection_rate.clamp(0.0, 0.99);
 
         let ocean_temps = &scratch.ocean_temps;
         let advected_temps = &scratch.advected_temps;
@@ -899,71 +901,127 @@ fn simulate_single_season(
     );
 }
 
-/// Строит кэш стрелок O(N) через equal-area bucketing по широтным полосам.
-/// Заменяет пару `sample_cells_on_sphere` + `build_arrows_from_samples`.
-fn build_arrow_cache(
+struct CellSpatialIndex {
+    grid: HashMap<(i32, i32, i32), Vec<usize>>,
+    cell_size: f32,
+}
+
+impl CellSpatialIndex {
+    fn new(topology: &WorldTopology) -> Self {
+        let n = topology.cells.len().max(1);
+        // Средний диаметр ячейки на единичной сфере (площадь ячейки ≈ 4π/n).
+        let cell_size = (4.0 / (n as f32).sqrt()).max(1e-3);
+
+        let mut grid: HashMap<(i32, i32, i32), Vec<usize>> = HashMap::with_capacity(n);
+        for (i, cell) in topology.cells.iter().enumerate() {
+            let key = (
+                (cell.center.x / cell_size).floor() as i32,
+                (cell.center.y / cell_size).floor() as i32,
+                (cell.center.z / cell_size).floor() as i32,
+            );
+            grid.entry(key).or_default().push(i);
+        }
+        Self { grid, cell_size }
+    }
+
+    fn nearest(&self, topology: &WorldTopology, p: Vec3) -> usize {
+        let cx = (p.x / self.cell_size).floor() as i32;
+        let cy = (p.y / self.cell_size).floor() as i32;
+        let cz = (p.z / self.cell_size).floor() as i32;
+
+        let mut best_i = 0usize;
+        let mut best_d = f32::MAX;
+
+        // Ищем кольцами; как только нашли хоть что-то — проверяем ещё одно
+        // кольцо на случай, если ближайшая ячейка лежит по ту сторону границы.
+        for r in 0..=4i32 {
+            // Нижняя граница расстояния до любого бакета на кольце r — (r-1)*cell_size.
+            // Если она уже больше текущего best_d — дальше искать бессмысленно.
+            if r > 0 && best_d < f32::MAX && ((r - 1) as f32 * self.cell_size).powi(2) > best_d {
+                break;
+            }
+
+            for dx in -r..=r {
+                for dy in -r..=r {
+                    for dz in -r..=r {
+                        if r > 0 && dx.abs() != r && dy.abs() != r && dz.abs() != r {
+                            continue;
+                        }
+                        if let Some(cells) = self.grid.get(&(cx + dx, cy + dy, cz + dz)) {
+                            for &i in cells {
+                                let d = p.distance_squared(topology.cells[i].center);
+                                if d < best_d {
+                                    best_d = d;
+                                    best_i = i;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        best_i
+    }
+}
+
+fn sample_cells_on_sphere_fast(
     topology: &WorldTopology,
-    vectors: &[Vec3],
+    index: &CellSpatialIndex,
+    count: usize,
+) -> Vec<usize> {
+    let golden = std::f32::consts::PI * (3.0 - 5.0_f32.sqrt());
+    let mut result = Vec::with_capacity(count);
+    let denom = (count.saturating_sub(1)).max(1) as f32;
+    let mut used = std::collections::HashSet::with_capacity(count);
+
+    for k in 0..count {
+        let y = 1.0 - (k as f32 / denom) * 2.0;
+        let r = (1.0 - y * y).max(0.0).sqrt();
+        let theta = golden * k as f32;
+        let sample = Vec3::new(theta.cos() * r, y, theta.sin() * r);
+
+        let best_i = index.nearest(topology, sample);
+        if used.insert(best_i) {
+            result.push(best_i);
+        }
+    }
+    result
+}
+
+fn build_arrows_from_samples(
+    samples: &[usize],
+    vectors: &[bevy::math::Vec3],
     geology: Option<&GeologyLayer>,
-    num_lat_bins: usize,
 ) -> Vec<(usize, f32)> {
-    use std::f32::consts::PI;
-    let num_cells = topology.cells.len();
-    let lat_bins = num_lat_bins.max(4);
-    let max_buckets = lat_bins * lat_bins;
+    let mut speeds: Vec<f32> = vectors.iter().map(|v| v.length()).collect();
+    speeds.sort_by(|a, b| a.total_cmp(b));
+    let idx = ((speeds.len() as f32) * 0.95) as usize;
+    let max_speed = speeds.get(idx).copied().unwrap_or(0.0001).max(0.0001);
 
-    let mut best_cell = vec![u32::MAX; max_buckets];
-    let mut best_speed = vec![0.0f32; max_buckets];
-
-    for (i, &v) in vectors.iter().enumerate().take(num_cells) {
+    let mut arrows = Vec::with_capacity(samples.len());
+    for &i in samples {
         if let Some(geo) = geology
             && !geo.is_ocean_cell(i)
         {
             continue;
         }
-        let speed = v.length();
-        if speed < 1e-4 {
+        let speed = vectors[i].length();
+        if speed < max_speed * 0.05 {
             continue;
         }
-
-        let cell = &topology.cells[i];
-        let sin_lat = cell.lat_lon.x.sin();
-        let lat_bin =
-            ((sin_lat + 1.0) * 0.5 * lat_bins as f32).min(lat_bins as f32 - 0.001) as usize;
-
-        let lat_center = (lat_bin as f32 + 0.5) / lat_bins as f32 * 2.0 - 1.0;
-        let cos_lat = (1.0 - lat_center * lat_center).max(0.0).sqrt();
-        let lon_per_band = (lat_bins as f32 * cos_lat).round().max(1.0) as usize;
-
-        let lon_norm = (cell.lat_lon.y + PI) / (2.0 * PI);
-        let lon_bin = (lon_norm * lon_per_band as f32).min(lon_per_band as f32 - 0.001) as usize;
-
-        let bucket = lat_bin * lat_bins + lon_bin;
-        if bucket < max_buckets && speed > best_speed[bucket] {
-            best_speed[bucket] = speed;
-            best_cell[bucket] = i as u32;
-        }
+        let s = (speed / max_speed).clamp(0.0, 1.0).sqrt();
+        arrows.push((i, s));
     }
+    arrows
+}
 
-    // 95-й перцентиль вместо максимума — устойчив к единичным пикам
-    let mut speeds: Vec<f32> = best_speed.iter().copied().filter(|&s| s > 0.0).collect();
-    speeds.sort_by(|a, b| a.total_cmp(b));
-    let max_speed = speeds
-        .get((speeds.len() as f32 * 0.95) as usize)
-        .copied()
-        .unwrap_or(0.0001)
-        .max(0.0001);
-
-    let mut result = Vec::with_capacity(max_buckets);
-    for bucket in 0..max_buckets {
-        if best_cell[bucket] == u32::MAX {
-            continue;
-        }
-        let norm = (best_speed[bucket] / max_speed).clamp(0.0, 1.0).sqrt();
-        if norm < 0.05 {
-            continue;
-        }
-        result.push((best_cell[bucket] as usize, norm));
-    }
-    result
+pub fn build_arrow_cache(
+    topology: &WorldTopology,
+    vectors: &[Vec3],
+    geology: Option<&GeologyLayer>,
+    sample_count: usize,
+) -> Vec<(usize, f32)> {
+    let index = CellSpatialIndex::new(topology);
+    let samples = sample_cells_on_sphere_fast(topology, &index, sample_count);
+    build_arrows_from_samples(&samples, vectors, geology)
 }

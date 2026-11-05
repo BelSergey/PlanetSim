@@ -32,7 +32,8 @@ use crate::{
             tectonics_data::GeologyLayer,
             tectonics_palettes::{
                 build_crust_age_colors, build_elevation_colors, build_lithology_colors,
-                build_plate_colors, build_ruggedness_colors, build_tectonic_stress_colors,
+                build_plate_colors, build_ruggedness_colors, build_tectonic_shear_colors,
+                build_tectonic_stress_colors,
             },
         },
     },
@@ -108,6 +109,7 @@ pub enum MapOverlay {
     Ruggedness,
     CrustAge,
     TectonicStress,
+    TectonicShear,
     Temperature,
     Humidity,
     Precipitation,
@@ -136,11 +138,16 @@ pub struct RiverOverlayMesh;
 pub struct SunVisualConfig {
     /// Toggles only the visible emissive sphere; DirectionalLight remains active.
     pub visible: bool,
+    /// Whether the Sunlight DirectionalLight casts shadow maps.
+    pub shadows_enabled: bool,
 }
 
 impl Default for SunVisualConfig {
     fn default() -> Self {
-        Self { visible: true }
+        Self {
+            visible: true,
+            shadows_enabled: false, // сохраняем текущее поведение
+        }
     }
 }
 
@@ -210,7 +217,12 @@ impl Plugin for ViewportPlugin {
             .add_systems(Update, sync_viewport_mesh.in_set(PipelineSet::Render))
             .add_systems(
                 Update,
-                (sync_map_background, sync_viewport_lighting).in_set(PipelineSet::Render),
+                (
+                    sync_map_background,
+                    sync_viewport_lighting,
+                    sync_sun_shadows,
+                )
+                    .in_set(PipelineSet::Render),
             )
             .add_systems(
                 Update,
@@ -222,6 +234,7 @@ impl Plugin for ViewportPlugin {
 fn setup_scene(
     mut commands: Commands,
     world_config: Res<WorldConfig>,
+    sun_config: Res<SunVisualConfig>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
@@ -246,7 +259,6 @@ fn setup_scene(
     let map_background_material = materials.add(StandardMaterial {
         base_color: Color::srgb(0.34, 0.49, 0.62),
         perceptual_roughness: 1.0,
-        unlit: true,
         ..default()
     });
     let map_background_mesh = meshes.add(Rectangle::new(1.0, 1.0));
@@ -317,7 +329,7 @@ fn setup_scene(
         system.spawn((
             DirectionalLight {
                 illuminance: 12000.0,
-                shadow_maps_enabled: false,
+                shadow_maps_enabled: sun_config.shadows_enabled, // ← ИЗМЕНЕНО
                 ..default()
             },
             Sunlight,
@@ -467,7 +479,7 @@ fn sync_viewport_mesh(
             // --- ПОЛНАЯ ПЕРЕСБОРКА МЕША ---
             let colors =
                 compute_overlay_colors(&overlay, &geology, &climate, &hydrology, &civ, &civ_config);
-            
+
             let mesh = build_globe_mesh(
                 &topology,
                 &geology.elevations,
@@ -480,13 +492,13 @@ fn sync_viewport_mesh(
             );
             local_state.deferred_mesh_drops.push(mesh_handle.0.clone());
             mesh_handle.0 = meshes.add(mesh);
-            
+
             local_state.cache.color_layout = Some(compute_color_layout(
                 &topology,
                 &geology.elevations,
                 is_flat_map,
             ));
-            
+
             // Кэшируем цвета при полной пересборке для любого слоя
             local_state.cache.last_colors_u8 = Some(quantize_colors(&colors));
             mesh_updated = true;
@@ -507,7 +519,7 @@ fn sync_viewport_mesh(
 
                 // Квантуем цвета в u8 (0..255), чтобы отсечь микроскопические изменения float
                 let current = quantize_colors(&colors);
-                
+
                 let dirty = local_state
                     .cache
                     .last_colors_u8
@@ -521,7 +533,7 @@ fn sync_viewport_mesh(
                                 .collect::<Vec<_>>()
                         })
                     });
-                    
+
                 let any_dirty = dirty
                     .as_ref()
                     .is_none_or(|mask| mask.iter().any(|&changed| changed));
@@ -568,7 +580,7 @@ fn sync_viewport_mesh(
                                 topology.cells.len(),
                                 dirty.as_deref(),
                             );
-                            
+
                             // Обновляем кэш новыми цветами
                             local_state.cache.last_colors_u8 = new_colors_cache;
                             mesh_updated = true;
@@ -638,6 +650,7 @@ fn compute_overlay_colors(
         MapOverlay::Ruggedness => build_ruggedness_colors(geology),
         MapOverlay::CrustAge => build_crust_age_colors(geology),
         MapOverlay::TectonicStress => build_tectonic_stress_colors(geology),
+        MapOverlay::TectonicShear => build_tectonic_shear_colors(geology),
         MapOverlay::Temperature => build_temperature_colors(climate),
         MapOverlay::Humidity => build_humidity_colors(climate),
         MapOverlay::Precipitation => build_precipitation_colors(climate),
@@ -713,4 +726,18 @@ pub fn draw_axis_and_equator_gizmos(
         radius + 0.05,
         Color::srgba(0.2, 0.8, 1.0, 0.9),
     );
+}
+
+fn sync_sun_shadows(
+    sun_config: Res<SunVisualConfig>,
+    mut light_query: Query<&mut DirectionalLight, With<Sunlight>>,
+) {
+    if !sun_config.is_changed() {
+        return;
+    }
+    for mut light in &mut light_query {
+        if light.shadow_maps_enabled != sun_config.shadows_enabled {
+            light.shadow_maps_enabled = sun_config.shadows_enabled;
+        }
+    }
 }

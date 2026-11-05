@@ -6,7 +6,9 @@ use bevy::{
 };
 use bevy_egui::egui;
 use futures_lite::future;
+use image::{Rgb, RgbImage};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -16,10 +18,19 @@ use std::{
 
 use crate::{
     domains::{
+        climate::climate_palettes::{build_precipitation_colors, build_temperature_colors},
         climate::{ClimateConfig, climate_data::ClimateLayer},
         generator::GenerationRequest,
-        hydrology::{HydrologyConfig, HydrologyLayer},
-        tectonics::{GeologyLayer, TectonicsConfig},
+        hydrology::{HydrologyConfig, HydrologyLayer, hydrology_palettes::build_biome_colors},
+        tectonics::{
+            GeologyLayer, TectonicsConfig,
+            tectonics_data::{MantlePlume, Plate, RockType, Volcano},
+            tectonics_palettes::{
+                build_crust_age_colors, build_elevation_colors, build_lithology_colors,
+                build_plate_colors, build_ruggedness_colors, build_tectonic_shear_colors,
+                build_tectonic_stress_colors,
+            },
+        },
     },
     world::{
         WorldConfig,
@@ -31,7 +42,124 @@ use crate::{
 
 const PLANET_SAVE_DIR: &str = "saves/planets";
 const CONFIG_SAVE_DIR: &str = "saves/configs";
+const REVIEW_EXPORT_DIR: &str = "saves/reviews";
 const PLANET_FILE_VERSION: u32 = 1;
+
+// Bincode is positional: serde's `default` cannot recover fields added to a
+// struct. Keep this schema to migrate geology chunks written before erosion
+// and inherited suture/rift memory were added.
+#[derive(Deserialize)]
+struct LegacyGeologyLayer {
+    plate_ids: Vec<usize>,
+    elevations: Vec<f32>,
+    crust_thickness: Vec<f32>,
+    crust_density: Vec<f32>,
+    crust_age: Vec<f32>,
+    sediment_thickness: Vec<f32>,
+    tectonic_stress: Vec<f32>,
+    orogeny_root: Vec<f32>,
+    subcell_shift: Vec<[f32; 3]>,
+    is_ocean: Vec<bool>,
+    continentality: Vec<f32>,
+    plates: Vec<Plate>,
+    plumes: Vec<MantlePlume>,
+    volcanoes: Vec<Volcano>,
+    volcano_mask: Vec<bool>,
+    lithology: Vec<RockType>,
+    terrain_ruggedness: Vec<f32>,
+    sim_step: u32,
+}
+
+// Complete geology schema written immediately before `tectonic_shear` was
+// added. Bincode is positional, so serde defaults cannot fill that final field.
+#[derive(Deserialize)]
+struct PreShearGeologyLayer {
+    plate_ids: Vec<usize>,
+    elevations: Vec<f32>,
+    crust_thickness: Vec<f32>,
+    crust_density: Vec<f32>,
+    crust_age: Vec<f32>,
+    sediment_thickness: Vec<f32>,
+    tectonic_stress: Vec<f32>,
+    orogeny_root: Vec<f32>,
+    subcell_shift: Vec<[f32; 3]>,
+    continental_factor: Vec<f32>,
+    suture_weakness: Vec<f32>,
+    orogen_age: Vec<f32>,
+    sediment_supply: Vec<f32>,
+    is_ocean: Vec<bool>,
+    continentality: Vec<f32>,
+    plates: Vec<Plate>,
+    subduction_polarity: Vec<i8>,
+    plumes: Vec<MantlePlume>,
+    volcanoes: Vec<Volcano>,
+    volcano_mask: Vec<bool>,
+    lithology: Vec<RockType>,
+    terrain_ruggedness: Vec<f32>,
+    sim_step: u32,
+}
+
+fn deserialize_geology_layer(bytes: &[u8]) -> Result<GeologyLayer, bincode::Error> {
+    if let Ok(geology) = bincode::deserialize::<GeologyLayer>(bytes) {
+        return Ok(geology);
+    }
+
+    if let Ok(old) = bincode::deserialize::<PreShearGeologyLayer>(bytes) {
+        let cell_count = old.elevations.len();
+        return Ok(GeologyLayer {
+            plate_ids: old.plate_ids,
+            elevations: old.elevations,
+            crust_thickness: old.crust_thickness,
+            crust_density: old.crust_density,
+            crust_age: old.crust_age,
+            sediment_thickness: old.sediment_thickness,
+            tectonic_stress: old.tectonic_stress,
+            orogeny_root: old.orogeny_root,
+            subcell_shift: old.subcell_shift,
+            continental_factor: old.continental_factor,
+            suture_weakness: old.suture_weakness,
+            orogen_age: old.orogen_age,
+            sediment_supply: old.sediment_supply,
+            is_ocean: old.is_ocean,
+            continentality: old.continentality,
+            plates: old.plates,
+            subduction_polarity: old.subduction_polarity,
+            plumes: old.plumes,
+            volcanoes: old.volcanoes,
+            volcano_mask: old.volcano_mask,
+            lithology: old.lithology,
+            terrain_ruggedness: old.terrain_ruggedness,
+            sim_step: old.sim_step,
+            tectonic_shear: vec![0.0; cell_count],
+            ..GeologyLayer::default()
+        });
+    }
+
+    let old: LegacyGeologyLayer = bincode::deserialize(bytes)?;
+    let cell_count = old.elevations.len();
+    Ok(GeologyLayer {
+        plate_ids: old.plate_ids,
+        elevations: old.elevations,
+        crust_thickness: old.crust_thickness,
+        crust_density: old.crust_density,
+        crust_age: old.crust_age,
+        sediment_thickness: old.sediment_thickness,
+        tectonic_stress: old.tectonic_stress,
+        orogeny_root: old.orogeny_root,
+        subcell_shift: old.subcell_shift,
+        is_ocean: old.is_ocean,
+        continentality: old.continentality,
+        plates: old.plates,
+        plumes: old.plumes,
+        volcanoes: old.volcanoes,
+        volcano_mask: old.volcano_mask,
+        lithology: old.lithology,
+        terrain_ruggedness: old.terrain_ruggedness,
+        sim_step: old.sim_step,
+        tectonic_shear: vec![0.0; cell_count],
+        ..GeologyLayer::default()
+    })
+}
 
 /// Бинарный контейнер сохранения планеты (НЕ хранит конфиги генерации).
 /// Каждый слой упакован в отдельный чанк байтов, чтобы отсутствие или устаревание
@@ -81,6 +209,9 @@ pub enum SaveLoadRequest {
     LoadPlanet {
         name: String,
         path: PathBuf,
+    },
+    ExportReview {
+        name: String,
     },
 }
 
@@ -218,7 +349,13 @@ pub struct LoadedPlanetPayload {
 }
 
 pub enum SaveLoadOutcome {
-    Saved { planet_name: String },
+    Saved {
+        planet_name: String,
+    },
+    ReviewExported {
+        image_path: String,
+        metadata_path: String,
+    },
     Loaded(Box<LoadedPlanetPayload>),
 }
 
@@ -325,6 +462,292 @@ fn scan_dir(dir: &str, ext: &str) -> Vec<FileEntry> {
     out
 }
 
+const REVIEW_MAP_WIDTH: u32 = 640;
+const REVIEW_MAP_HEIGHT: u32 = 320;
+const REVIEW_LABEL_HEIGHT: u32 = 24;
+
+fn write_planet_review(
+    name: &str,
+    seed: u32,
+    radius: f32,
+    subdivisions: u32,
+    topology: &WorldTopology,
+    geology: &GeologyLayer,
+    climate: &ClimateLayer,
+    hydrology: &HydrologyLayer,
+    tectonics_config: &TectonicsConfig,
+    climate_config: &ClimateConfig,
+    hydrology_config: &HydrologyConfig,
+) -> Result<(String, String), String> {
+    let n = topology.cells.len();
+    let panels: [(&str, Vec<[f32; 4]>); 10] = [
+        ("Elevation", build_elevation_colors(geology)),
+        ("Plate and crust type", build_plate_colors(geology)),
+        ("Crust age", build_crust_age_colors(geology)),
+        ("Tectonic stress", build_tectonic_stress_colors(geology)),
+        ("Lithology", build_lithology_colors(geology)),
+        ("Terrain ruggedness", build_ruggedness_colors(geology)),
+        ("Precipitation", build_precipitation_colors(climate)),
+        ("Temperature", build_temperature_colors(climate)),
+        ("Biome", build_biome_colors(hydrology)),
+        ("Transverse shear", build_tectonic_shear_colors(geology)),
+    ];
+
+    let tile_height = REVIEW_LABEL_HEIGHT + REVIEW_MAP_HEIGHT;
+    let rows = (panels.len() as u32).div_ceil(3);
+    let mut sheet =
+        RgbImage::from_pixel(REVIEW_MAP_WIDTH * 3, tile_height * rows, Rgb([18, 22, 29]));
+    for (index, (title, colors)) in panels.iter().enumerate() {
+        let col = index as u32 % 3;
+        let row = index as u32 / 3;
+        let x0 = col * REVIEW_MAP_WIDTH;
+        let y0 = row * tile_height;
+        let color = [
+            (54 + (index as u8 * 23)) % 180 + 55,
+            (92 + (index as u8 * 37)) % 150 + 70,
+            (130 + (index as u8 * 17)) % 120 + 95,
+        ];
+        for y in y0..y0 + REVIEW_LABEL_HEIGHT {
+            for x in x0..x0 + REVIEW_MAP_WIDTH {
+                sheet.put_pixel(x, y, Rgb(color));
+            }
+        }
+        draw_panel_number(&mut sheet, x0 + 9, y0 + 7, index as u8 + 1);
+        rasterize_cell_map(
+            &mut sheet,
+            x0,
+            y0 + REVIEW_LABEL_HEIGHT,
+            REVIEW_MAP_WIDTH,
+            REVIEW_MAP_HEIGHT,
+            topology,
+            colors,
+        );
+        let _ = title;
+    }
+
+    let base_name = format!("{}_seed_{}_subdiv_{}", name, seed, subdivisions);
+    let image_path = Path::new(REVIEW_EXPORT_DIR).join(format!("{}_review.png", base_name));
+    let metadata_path = Path::new(REVIEW_EXPORT_DIR).join(format!("{}_review.json", base_name));
+    fs::create_dir_all(REVIEW_EXPORT_DIR)
+        .map_err(|e| format!("Не удалось создать папку экспорта: {e}"))?;
+
+    let metadata = json!({
+        "format": "PlanetSim review bundle",
+        "format_version": 1,
+        "planet": {
+            "name": name,
+            "seed": seed,
+            "radius": radius,
+            "subdivisions": subdivisions,
+            "cell_count": n,
+            "plate_count": geology.plates.len(),
+            "tectonic_step": geology.sim_step,
+        },
+        "image": image_path.to_string_lossy(),
+        "panels": [
+            { "number": 1, "layer": "Elevation", "units": "normalized height; sea level = 0" },
+            { "number": 2, "layer": "Plate and crust type", "note": "color hue identifies plate; lightness separates continental and oceanic crust" },
+            { "number": 3, "layer": "Crust age", "units": "model time units" },
+            { "number": 4, "layer": "Tectonic stress", "note": "blue = extension, red = convergence" },
+            { "number": 5, "layer": "Lithology" },
+            { "number": 6, "layer": "Terrain ruggedness" },
+            { "number": 7, "layer": "Precipitation", "note": "active season palette; values normalized by the climate model" },
+            { "number": 8, "layer": "Temperature", "units": "degrees Celsius" },
+            { "number": 9, "layer": "Biome" },
+            { "number": 10, "layer": "Transverse shear intensity", "units": "normalized tangential relative plate speed [0..1]" }
+        ],
+        "field_stats": {
+            "elevation": summarize_values(&geology.elevations),
+            "crust_age": summarize_values(&geology.crust_age),
+            "crust_thickness_km": summarize_values(&geology.crust_thickness),
+            "tectonic_stress": summarize_values(&geology.tectonic_stress),
+            "tectonic_shear": summarize_values(&geology.tectonic_shear),
+            "terrain_ruggedness": summarize_values(&geology.terrain_ruggedness),
+            "precipitation": summarize_values(&climate.precipitation),
+            "temperature_c": summarize_values(&climate.temperatures),
+            "flow_accumulation": summarize_values(&hydrology.flow_accumulation),
+        },
+        "generator_config": {
+            "tectonics": tectonics_config,
+            "climate": climate_config,
+            "hydrology": hydrology_config,
+        }
+    });
+
+    sheet
+        .save(&image_path)
+        .map_err(|e| format!("Не удалось записать PNG: {e}"))?;
+    let json_text = serde_json::to_string_pretty(&metadata)
+        .map_err(|e| format!("Не удалось сформировать JSON сводку: {e}"))?;
+    fs::write(&metadata_path, json_text)
+        .map_err(|e| format!("Не удалось записать JSON сводку: {e}"))?;
+
+    Ok((
+        image_path.to_string_lossy().into_owned(),
+        metadata_path.to_string_lossy().into_owned(),
+    ))
+}
+
+fn summarize_values(values: &[f32]) -> serde_json::Value {
+    let mut count = 0usize;
+    let mut non_finite = 0usize;
+    let mut min = f32::INFINITY;
+    let mut max = f32::NEG_INFINITY;
+    let mut sum = 0.0_f64;
+    for &value in values {
+        if value.is_finite() {
+            count += 1;
+            min = min.min(value);
+            max = max.max(value);
+            sum += value as f64;
+        } else {
+            non_finite += 1;
+        }
+    }
+    json!({
+        "count": values.len(),
+        "finite_count": count,
+        "non_finite_count": non_finite,
+        "min": if count > 0 { Some(min) } else { None },
+        "mean": if count > 0 { Some(sum / count as f64) } else { None },
+        "max": if count > 0 { Some(max) } else { None },
+    })
+}
+
+fn draw_panel_number(image: &mut RgbImage, x: u32, y: u32, number: u8) {
+    const DIGITS: [[u8; 5]; 10] = [
+        [0b111, 0b101, 0b101, 0b101, 0b111],
+        [0b010, 0b110, 0b010, 0b010, 0b111],
+        [0b110, 0b001, 0b111, 0b100, 0b111],
+        [0b110, 0b001, 0b011, 0b001, 0b110],
+        [0b101, 0b101, 0b111, 0b001, 0b001],
+        [0b111, 0b100, 0b110, 0b001, 0b110],
+        [0b011, 0b100, 0b110, 0b101, 0b010],
+        [0b111, 0b001, 0b010, 0b010, 0b010],
+        [0b111, 0b101, 0b111, 0b101, 0b111],
+        [0b111, 0b101, 0b111, 0b001, 0b110],
+    ];
+    for (digit_index, character) in number.to_string().bytes().enumerate() {
+        let digit = (character - b'0') as usize;
+        let Some(glyph) = DIGITS.get(digit) else {
+            continue;
+        };
+        let digit_x = x + digit_index as u32 * 8;
+        for (row, bits) in glyph.iter().enumerate() {
+            for col in 0..3 {
+                if bits & (1 << (2 - col)) != 0 {
+                    for dy in 0..2 {
+                        for dx in 0..2 {
+                            image.put_pixel(
+                                digit_x + col * 2 + dx,
+                                y + row as u32 * 2 + dy,
+                                Rgb([255, 255, 255]),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn rasterize_cell_map(
+    image: &mut RgbImage,
+    x_origin: u32,
+    y_origin: u32,
+    width: u32,
+    height: u32,
+    topology: &WorldTopology,
+    colors: &[[f32; 4]],
+) {
+    let tau = std::f32::consts::TAU;
+    let pi = std::f32::consts::PI;
+    for (cell_id, cell) in topology.cells.iter().enumerate() {
+        let color = colors
+            .get(cell_id)
+            .copied()
+            .unwrap_or([0.18, 0.18, 0.20, 1.0]);
+        let rgb = Rgb([
+            linear_to_srgb_u8(color[0]),
+            linear_to_srgb_u8(color[1]),
+            linear_to_srgb_u8(color[2]),
+        ]);
+        let center_lat = cell.lat_lon.x;
+        let center_lon = cell.lat_lon.y;
+        let center_x = (center_lon + pi) / tau * width as f32;
+        let mut polygon = Vec::with_capacity(cell.corners.len());
+        for corner in &cell.corners {
+            let lat = corner.y.clamp(-1.0, 1.0).asin();
+            let lon = corner.z.atan2(corner.x);
+            let delta_lon = (lon - center_lon + pi).rem_euclid(tau) - pi;
+            let px = center_x + delta_lon / tau * width as f32;
+            let py = (0.5 - lat / pi) * height as f32;
+            polygon.push((px, py));
+        }
+        if polygon.len() < 3 {
+            continue;
+        }
+        let min_x = polygon
+            .iter()
+            .map(|p| p.0)
+            .fold(f32::INFINITY, f32::min)
+            .floor() as i32;
+        let max_x = polygon
+            .iter()
+            .map(|p| p.0)
+            .fold(f32::NEG_INFINITY, f32::max)
+            .ceil() as i32;
+        let min_y = polygon
+            .iter()
+            .map(|p| p.1)
+            .fold(f32::INFINITY, f32::min)
+            .floor()
+            .max(0.0) as i32;
+        let max_y = polygon
+            .iter()
+            .map(|p| p.1)
+            .fold(f32::NEG_INFINITY, f32::max)
+            .ceil()
+            .min(height as f32) as i32;
+
+        for py in min_y..max_y {
+            for px in min_x..=max_x {
+                if point_in_polygon(px as f32 + 0.5, py as f32 + 0.5, &polygon) {
+                    let wrapped_x = px.rem_euclid(width as i32) as u32;
+                    image.put_pixel(x_origin + wrapped_x, y_origin + py as u32, rgb);
+                }
+            }
+        }
+        let _ = center_lat;
+    }
+}
+
+fn point_in_polygon(x: f32, y: f32, polygon: &[(f32, f32)]) -> bool {
+    let mut inside = false;
+    let mut j = polygon.len() - 1;
+    for i in 0..polygon.len() {
+        let (xi, yi) = polygon[i];
+        let (xj, yj) = polygon[j];
+        let crosses = (yi > y) != (yj > y)
+            && x < (xj - xi) * (y - yi) / (yj - yi).abs().max(1e-8).copysign(yj - yi) + xi;
+        if crosses {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
+}
+
+fn linear_to_srgb_u8(linear: f32) -> u8 {
+    let linear = linear.clamp(0.0, 1.0);
+    let srgb = if linear <= 0.003_130_8 {
+        linear * 12.92
+    } else {
+        1.055 * linear.powf(1.0 / 2.4) - 0.055
+    };
+    (srgb * 255.0).round() as u8
+}
+
 fn sanitize_filename(name: &str) -> String {
     let trimmed = name.trim();
     if trimmed.is_empty() {
@@ -361,6 +784,9 @@ pub fn spawn_save_load_task(
     geology: Res<GeologyLayer>,
     climate: Res<ClimateLayer>,
     hydrology: Res<HydrologyLayer>,
+    tectonics_config: Res<TectonicsConfig>,
+    climate_config: Res<ClimateConfig>,
+    hydrology_config: Res<HydrologyConfig>,
 ) {
     // Если есть активная незавершенная задача — ждём её окончания
     for (entity, t) in existing_tasks.iter() {
@@ -473,6 +899,59 @@ pub fn spawn_save_load_task(
             });
         }
 
+        SaveLoadRequest::ExportReview { name } => {
+            if geology.elevations.is_empty() {
+                save_ui.set_err("Сначала сгенерируйте или загрузите планету");
+                return;
+            }
+            let clean_name = sanitize_filename(&name);
+            let topology = (*topology).clone();
+            let geology = (*geology).clone();
+            let climate = (*climate).clone();
+            let hydrology = (*hydrology).clone();
+            let tectonics_config = (*tectonics_config).clone();
+            let climate_config = (*climate_config).clone();
+            let hydrology_config = (*hydrology_config).clone();
+            let seed = world_config.seed;
+            let radius = world_config.radius;
+            let subdivisions = topology.subdivisions;
+            let logger = SaveLoadLogger::new(1);
+            let thread_logger = logger.clone();
+            save_ui.is_busy = true;
+            let title = format!("Экспорт снимка планеты «{}»", clean_name);
+
+            let task = pool.spawn(async move {
+                thread_logger.start_step("Построение диагностических карт и сводки...");
+                let (image_path, metadata_path) = write_planet_review(
+                    &clean_name,
+                    seed,
+                    radius,
+                    subdivisions,
+                    &topology,
+                    &geology,
+                    &climate,
+                    &hydrology,
+                    &tectonics_config,
+                    &climate_config,
+                    &hydrology_config,
+                )?;
+                thread_logger.finish_ok();
+                Ok(SaveLoadOutcome::ReviewExported {
+                    image_path,
+                    metadata_path,
+                })
+            });
+
+            commands.spawn(SaveLoadTask {
+                title,
+                is_saving: true,
+                is_initial: false,
+                logger,
+                task: Some(task),
+                finished_at: None,
+            });
+        }
+
         SaveLoadRequest::LoadPlanet { name, path } => {
             let current_subdivs = topology.subdivisions;
             let current_num_cells = topology.cells.len();
@@ -510,7 +989,7 @@ pub fn spawn_save_load_task(
                 let geology = match save_file
                     .geology_bytes
                     .as_deref()
-                    .map(bincode::deserialize::<GeologyLayer>)
+                    .map(deserialize_geology_layer)
                 {
                     Some(Ok(loaded_geo)) if loaded_geo.elevations.len() == num_cells => loaded_geo,
                     Some(Ok(_)) => {
@@ -666,6 +1145,15 @@ pub fn handle_save_load_task(
                     save_ui.refresh_lists();
                     save_ui.set_ok(format!("Планета «{}» успешно сохранена", planet_name));
                 }
+                Ok(SaveLoadOutcome::ReviewExported {
+                    image_path,
+                    metadata_path,
+                }) => {
+                    save_ui.set_ok(format!(
+                        "Снимок готов. Прикрепи PNG для просмотра и JSON с настройками: {} | {}",
+                        image_path, metadata_path
+                    ));
+                }
                 Ok(SaveLoadOutcome::Loaded(payload)) => {
                     let LoadedPlanetPayload {
                         planet_name,
@@ -790,6 +1278,20 @@ pub fn draw_save_load_windows_system(
                         });
                     }
                 });
+                ui.add_enabled_ui(has_planet && !is_busy, |ui| {
+                    if ui
+                        .add_sized(
+                            [ui.available_width(), 32.0],
+                            egui::Button::new("Экспортировать снимок для разбора (PNG + JSON)"),
+                        )
+                        .clicked()
+                    {
+                        save_ui.pending_request = Some(SaveLoadRequest::ExportReview {
+                            name: save_ui.planet_save_name.clone(),
+                        });
+                    }
+                });
+                ui.small("Файлы появятся в saves/reviews. PNG содержит 10 карт: добавлена интенсивность поперечного сдвига; JSON содержит seed, настройки и статистику слоёв.");
                 if !has_planet {
                     ui.small("Сначала сгенерируйте или загрузите планету, чтобы сохранить её.");
                 }

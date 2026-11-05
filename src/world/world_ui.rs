@@ -36,7 +36,7 @@ pub fn draw_world_tab(ui: &mut egui::Ui, world: &mut World) {
     world.resource_scope(|_world, mut cfg: Mut<WorldConfig>| {
         radius_changed = ui
             .add(
-                egui::Slider::new(&mut cfg.radius, 1.0..=20.0)
+                egui::Slider::new(&mut cfg.radius, 1.0..=10.0)
                     .step_by(0.1)
                     .text("Радиус"),
             )
@@ -56,7 +56,7 @@ pub fn draw_world_tab(ui: &mut egui::Ui, world: &mut World) {
     let mut launch_subdivs: Option<(u32, bool)> = None;
     world.resource_scope(|_world, mut cfg: Mut<WorldConfig>| {
         ui.add(
-            egui::Slider::new(&mut cfg.next_planet_subdivisions, 3..=9)
+            egui::Slider::new(&mut cfg.next_planet_subdivisions, 3..=10)
                 .integer()
                 .text("Детализация"),
         );

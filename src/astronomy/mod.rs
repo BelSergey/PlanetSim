@@ -56,7 +56,7 @@ impl AxialRotation {
         Self {
             obliquity_radians: 23.439281_f32.to_radians(),
             rotation_period_seconds: 86_164.090_5,
-            max_visual_spin_speed: 0.8,
+            max_visual_spin_speed: 0.2,
         }
     }
 }

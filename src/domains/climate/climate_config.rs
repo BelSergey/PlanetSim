@@ -118,7 +118,7 @@ impl Default for ClimateConfig {
 
             ocean_current_speed_multiplier: 0.15,
             boundary_current_multiplier: 4.0,
-            ocean_advection_rate: 1.50,
+            ocean_advection_rate: 0.99,
 
             geostrophic_multiplier: 2.0,
 

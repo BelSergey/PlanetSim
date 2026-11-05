@@ -22,7 +22,7 @@ use crate::{
         save::SaveLoadTask,
         tectonics::tectonics_palettes::{
             crust_age_legend, elevation_legend, lithology_legend, plates_legend, ruggedness_legend,
-            tectonic_stress_legend,
+            tectonic_shear_legend, tectonic_stress_legend,
         },
     },
     ui::shell::ShellLayout,
@@ -250,7 +250,7 @@ pub struct LegendState {
 
 impl Default for LegendState {
     fn default() -> Self {
-        Self { open: true }
+        Self { open: false }
     }
 }
 
@@ -324,6 +324,7 @@ fn draw_legend_for(ui: &mut egui::Ui, overlay: &MapOverlay) {
         MapOverlay::Ruggedness => ruggedness_legend(),
         MapOverlay::CrustAge => crust_age_legend(),
         MapOverlay::TectonicStress => tectonic_stress_legend(),
+        MapOverlay::TectonicShear => tectonic_shear_legend(),
         MapOverlay::Temperature => temperature_legend(),
         MapOverlay::Humidity => humidity_legend(),
         MapOverlay::Precipitation => precipitation_legend(),

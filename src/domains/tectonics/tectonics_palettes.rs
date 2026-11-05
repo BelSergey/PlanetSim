@@ -209,6 +209,21 @@ pub fn build_tectonic_stress_colors(geology: &GeologyLayer) -> Vec<[f32; 4]> {
 
 // ==== ЛЕГЕНДЫ КАРТЫ ====
 
+/// Tangential shear intensity at plate boundaries: green is low and red is
+/// strong. This is unsigned motion parallel to the boundary.
+pub fn build_tectonic_shear_colors(geology: &GeologyLayer) -> Vec<[f32; 4]> {
+    geology
+        .tectonic_shear
+        .par_iter()
+        .map(|&shear| {
+            let t = shear.clamp(0.0, 1.0);
+            Color::srgb(0.10 + 0.88 * t, 0.16 + 0.40 * (1.0 - t), 0.32 * (1.0 - t))
+                .to_linear()
+                .to_f32_array()
+        })
+        .collect()
+}
+
 pub fn elevation_legend() -> MapLegend {
     MapLegend {
         title: "Рельеф",
@@ -372,6 +387,26 @@ pub fn crust_age_legend() -> MapLegend {
 }
 
 /// Легенда тектонического напряжения на границах плит.
+pub fn tectonic_shear_legend() -> MapLegend {
+    MapLegend {
+        title: "Поперечный сдвиг плит",
+        entries: vec![
+            LegendEntry {
+                rgb: rgb_u8(0.10, 0.56, 0.32),
+                label: "Слабый сдвиг (0.0)".into(),
+            },
+            LegendEntry {
+                rgb: rgb_u8(0.54, 0.36, 0.16),
+                label: "Умеренный сдвиг (0.5)".into(),
+            },
+            LegendEntry {
+                rgb: rgb_u8(0.98, 0.16, 0.00),
+                label: "Сильный сдвиг (1.0)".into(),
+            },
+        ],
+    }
+}
+
 pub fn tectonic_stress_legend() -> MapLegend {
     MapLegend {
         title: "Напряжение границ",

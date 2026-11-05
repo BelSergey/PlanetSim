@@ -10,7 +10,7 @@ pub use climate_config::ClimateConfig;
 pub use climate_data::{ClimateLayer, ClimateSeason};
 pub use solver::{ClimateSolverCache, simulate_all_seasons};
 
-use crate::viewport::MapOverlay;
+//use crate::viewport::MapOverlay;
 
 use crate::{
     astronomy::{AstronomyUpdateSet, OrbitalSeasonState},
@@ -63,7 +63,7 @@ fn update_dynamic_seasonal_climate(
     control: Res<SeasonalControl>,
     season_state: Res<OrbitalSeasonState>,
     time: Res<Time<Real>>,
-    overlay: Res<MapOverlay>, // <--- ДОБАВИТЬ
+    //overlay: Res<MapOverlay>,
     mut config: ResMut<ClimateConfig>,
     mut climate: ResMut<ClimateLayer>,
     mut pipeline: ResMut<WorldPipeline>,
@@ -79,12 +79,12 @@ fn update_dynamic_seasonal_climate(
     }
 
     *interpolate_cooldown += time.delta_secs();
-    
+
     // Жёсткий лимит: не чаще 4 раз в секунду
     if *interpolate_cooldown < 1.0 {
         return;
     }
-    
+
     // Обновляем, только если сезон сдвинулся существенно (на 2%)
     if (season_state.season_factor - *last_factor).abs() < 0.1 {
         *interpolate_cooldown = 0.0;
@@ -103,17 +103,17 @@ fn update_dynamic_seasonal_climate(
         ClimateSeason::Spring
     };
 
-    let affects_mesh = matches!(
-        *overlay,
-        MapOverlay::SpaceView
-            | MapOverlay::Temperature
-            | MapOverlay::Humidity
-            | MapOverlay::Precipitation
-            | MapOverlay::Albedo
-            | MapOverlay::Continentality
-            | MapOverlay::Pressure
-            | MapOverlay::Winds
-    );
+    // let affects_mesh = matches!(
+    //     *overlay,
+    //     MapOverlay::SpaceView
+    //         | MapOverlay::Temperature
+    //         | MapOverlay::Humidity
+    //         | MapOverlay::Precipitation
+    //         | MapOverlay::Albedo
+    //         | MapOverlay::Continentality
+    //         | MapOverlay::Pressure
+    //         | MapOverlay::Winds
+    // );
 
     if new_season != config.active_season {
         config.active_season = new_season;

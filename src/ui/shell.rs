@@ -39,6 +39,7 @@ const LAYERS: &[(MapOverlay, &str)] = &[
     (MapOverlay::Ruggedness, "Рельефность"),
     (MapOverlay::CrustAge, "Возраст коры"),
     (MapOverlay::TectonicStress, "Напряжение границ"),
+    (MapOverlay::TectonicShear, "Поперечный сдвиг"),
     (MapOverlay::Temperature, "Температура"),
     (MapOverlay::Humidity, "Влажность"),
     (MapOverlay::Precipitation, "Осадки"),
@@ -378,6 +379,15 @@ fn draw_left_panel(ui: &mut egui::Ui, world: &mut World) -> egui::Rect {
                     ui.checkbox(&mut view_cfg.show_wind_arrows, "3D-стрелки ветров");
                     ui.checkbox(&mut view_cfg.show_ocean_currents, "3D-стрелки течений");
                     ui.checkbox(&mut view_cfg.show_river_flow, "Стрелки течения рек");
+                });
+
+                world.resource_scope(|_world, mut sun_cfg: Mut<SunVisualConfig>| {
+                    ui.checkbox(&mut sun_cfg.shadows_enabled, "Тени рельефа")
+                        .on_hover_text(
+                            "Тени от рельефа, гор и вулканов.\n\
+             На плотной сетке (subdiv 7+) может заметно снизить FPS.\n\
+             Не действует в режиме освещения «Равномерно».",
+                        );
                 });
 
                 if reposition || recolor {

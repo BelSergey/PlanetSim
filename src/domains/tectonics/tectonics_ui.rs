@@ -35,6 +35,10 @@ pub fn draw_tectonics_tab_system(
             .text("Доля чисто океанических плит"),
     );
     ui.add(
+        egui::Slider::new(&mut config.craton_cluster_count, 2..=6)
+            .text("Число континентальных ядер"),
+    );
+    ui.add(
         egui::Slider::new(&mut config.craton_eccentricity, 0.0..=1.2)
             .text("Смещение кратона к краю плиты"),
     );
