@@ -94,8 +94,8 @@ pub fn finalize_tectonics(
                 let age_norm = (orog_age[i] / 3.0).clamp(0.0, 1.0);
                 let sharp_ridge = (1.0 - raw_m1.abs()) * (0.65 + 0.35 * (1.0 - raw_m2.abs()));
                 let weathered_hill = 0.50 + 0.35 * raw_m1 + 0.15 * raw_m2;
-                let ridge_crest =
-                    sharp_ridge * (1.0 - age_norm * 0.65) + weathered_hill * (age_norm * 0.65);
+                let ridge_crest = sharp_ridge * (1.0 - age_norm * 0.65)
+                    + weathered_hill * (age_norm * 0.65);
 
                 let age_amp_atten = 1.0 - age_norm * 0.48;
                 let mtn_mod =
@@ -464,9 +464,11 @@ pub(crate) fn compute_terrain_ruggedness(
 
             let d = cell.center.as_dvec3();
             let crag_a =
-                (noise.get([d.x * 26.0 + 13.4, d.y * 26.0 - 27.8, d.z * 26.0 + 41.2]) as f32).abs();
+                (noise.get([d.x * 26.0 + 13.4, d.y * 26.0 - 27.8, d.z * 26.0 + 41.2]) as f32)
+                    .abs();
             let crag_b =
-                (noise.get([d.x * 52.0 - 31.9, d.y * 52.0 + 18.5, d.z * 52.0 - 22.7]) as f32).abs();
+                (noise.get([d.x * 52.0 - 31.9, d.y * 52.0 + 18.5, d.z * 52.0 - 22.7]) as f32)
+                    .abs();
             let micro_crags = (crag_a * 0.65 + crag_b * 0.35).clamp(0.0, 1.0);
 
             let rock_retention = match rock {

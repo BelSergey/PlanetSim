@@ -267,7 +267,6 @@ pub(super) fn draw_ocean_currents_gizmos(
     };
     let globe_transform = global_transform.compute_transform();
     let radius = world_config.radius;
-    let height_scale = world_config.height_scale();
     let base_len = radius * 0.075;
     let is_flat_map = *view_mode == ViewMode::Map3D;
 

@@ -1025,3 +1025,14 @@ pub fn build_arrow_cache(
     let samples = sample_cells_on_sphere_fast(topology, &index, sample_count);
     build_arrows_from_samples(&samples, vectors, geology)
 }
+
+pub fn build_arrow_cache(
+    topology: &WorldTopology,
+    vectors: &[Vec3],
+    geology: Option<&GeologyLayer>,
+    sample_count: usize,
+) -> Vec<(usize, f32)> {
+    let index = CellSpatialIndex::new(topology);
+    let samples = sample_cells_on_sphere_fast(topology, &index, sample_count);
+    build_arrows_from_samples(&samples, vectors, geology)
+}

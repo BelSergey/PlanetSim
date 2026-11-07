@@ -380,6 +380,7 @@ fn migrate_cell_plate_boundaries(
                 if !has_diff_nbr {
                     return;
                 }
+            }
 
                 let r_i = topology.cells[i].center;
                 let v_my = geology.plates[my_p].omega.cross(r_i);
@@ -440,6 +441,9 @@ fn migrate_cell_plate_boundaries(
                         best_winner = nbr_p;
                     }
                 }
+                *out_pid = cand_p;
+                return;
+            }
 
                 *pid_out = best_winner;
             });

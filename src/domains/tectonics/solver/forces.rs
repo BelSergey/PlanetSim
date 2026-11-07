@@ -125,7 +125,11 @@ pub fn update_plate_velocities(
                     let tang_dir = tang_v.normalize_or_zero();
                     let fault_weakening = 1.0 - geology.suture_weakness[i] * 0.45;
                     resist_force -= tang_dir
-                        * (config.mantle_drag_coeff * 0.55 * shear * fault_weakening * edge_weight);
+                        * (config.mantle_drag_coeff
+                            * 0.55
+                            * shear
+                            * fault_weakening
+                            * edge_weight);
                 }
             }
 
@@ -170,8 +174,7 @@ pub fn update_plate_velocities(
             // это создаёт растягивающее напряжение вдоль диаметральной оси `offset_from_center`.
             let outward_pull = driving_force.dot(offset_from_center).max(0.0) + plume_radial_pull;
             // Учитываем локальное ослабление прочности коры древними швами (`suture_weakness`)
-            let weakness_boost =
-                1.0 + geology.suture_weakness[i] * (config.suture_weakness_mult - 1.0).max(0.0);
+            let weakness_boost = 1.0 + geology.suture_weakness[i] * (config.suture_weakness_mult - 1.0).max(0.0);
             let eff_tension = outward_pull * weakness_boost;
 
             CellForceContrib {
@@ -213,8 +216,7 @@ pub fn update_plate_velocities(
     }
 
     // 4. Интеграция угловой скорости, прогрева суперконтинента и накопленного растяжения
-    let split_ref_area =
-        (4.0 * std::f32::consts::PI * config.plate_split_area_ratio.max(0.05)).max(0.25);
+    let split_ref_area = (4.0 * std::f32::consts::PI * config.plate_split_area_ratio.max(0.05)).max(0.25);
     let step_f = geology.sim_step as f32;
 
     for (p_id, plate) in geology.plates.iter_mut().enumerate() {
@@ -299,8 +301,7 @@ pub fn update_plate_velocities(
             } else {
                 new_axis
             };
-            plate.tension_axis =
-                (plate.tension_axis * 0.65 + signed_axis * 0.35).normalize_or_zero();
+            plate.tension_axis = (plate.tension_axis * 0.65 + signed_axis * 0.35).normalize_or_zero();
         }
         if plate.tension_axis == Vec3::ZERO {
             plate.tension_axis = plate.euler_pole.cross(plate.center_dir).normalize_or_zero();

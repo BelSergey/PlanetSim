@@ -284,6 +284,55 @@ impl GeologyLayer {
         self.subduction_polarity[overriding_plate * n + subducting_plate] = -1;
     }
 
+    /// Проверяет и при необходимости доинициализирует новые вспомогательные векторы после загрузки старых сохранений
+    pub fn ensure_aux_buffers(&mut self, num_cells: usize) {
+        if self.continental_factor.len() != num_cells {
+            self.continental_factor.resize(num_cells, 0.0);
+        }
+        if self.suture_weakness.len() != num_cells {
+            self.suture_weakness.resize(num_cells, 0.0);
+        }
+        if self.orogen_age.len() != num_cells {
+            self.orogen_age.resize(num_cells, 0.0);
+        }
+        if self.sediment_supply.len() != num_cells {
+            self.sediment_supply.resize(num_cells, 0.0);
+        }
+        let n_plates = self.plates.len();
+        if self.subduction_polarity.len() != n_plates * n_plates {
+            self.subduction_polarity.resize(n_plates * n_plates, 0);
+        }
+    }
+
+    /// Возвращает полярность субдукции для пары плит `(p1, p2)`:
+    /// `true`, если `p1` является нижней (погружающейся в жёлоб) плитой относительно `p2`.
+    #[inline]
+    pub fn is_plate_subducting_under(&self, p1: usize, p2: usize) -> Option<bool> {
+        let n = self.plates.len();
+        if p1 >= n || p2 >= n || p1 == p2 || self.subduction_polarity.len() != n * n {
+            return None;
+        }
+        match self.subduction_polarity[p1 * n + p2] {
+            1 => Some(true),
+            -1 => Some(false),
+            _ => None,
+        }
+    }
+
+    /// Фиксирует полярность субдукции между плитами `subducting_plate` (нижняя) и `overriding_plate` (верхняя)
+    #[inline]
+    pub fn set_subduction_polarity(&mut self, subducting_plate: usize, overriding_plate: usize) {
+        let n = self.plates.len();
+        if subducting_plate >= n || overriding_plate >= n || subducting_plate == overriding_plate {
+            return;
+        }
+        if self.subduction_polarity.len() != n * n {
+            self.subduction_polarity.resize(n * n, 0);
+        }
+        self.subduction_polarity[subducting_plate * n + overriding_plate] = 1;
+        self.subduction_polarity[overriding_plate * n + subducting_plate] = -1;
+    }
+
     /// Проверяет, является ли кора континентальной (по низкой плотности фельзического кратона).
     #[inline]
     pub fn is_continental_crust(&self, cell_id: usize) -> bool {

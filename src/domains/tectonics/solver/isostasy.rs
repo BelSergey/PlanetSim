@@ -86,9 +86,13 @@ pub fn update_isostasy_and_erosion(
                 let eff_plate_offset = plate_offset * boundary_fade * 0.5;
 
                 // 1. Базовая высота из профиля окраины (с учётом пассивного шельфа vs активного жёлоба)
-                let mut h =
-                    margin_hypsometric_curve(c1, eff_cont_base, eff_ocean_base, str_abs, sed_wedge)
-                        + eff_plate_offset;
+                let mut h = margin_hypsometric_curve(
+                    c1,
+                    eff_cont_base,
+                    eff_ocean_base,
+                    str_abs,
+                    sed_wedge,
+                ) + eff_plate_offset;
 
                 // 2. Остывание и проседание старой океанической коры (закон Парсонса — Склейтера)
                 if c1 < 0.28 {

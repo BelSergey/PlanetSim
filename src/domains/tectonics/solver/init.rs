@@ -313,6 +313,8 @@ pub fn generate_plates(rng: &mut impl RngExt, config: &TectonicsConfig) -> Vec<P
                 seed_offset: rng.random_range(0.0..100.0),
             };
         }
+        cluster_centers.push(best_dir);
+    }
 
         let pole_cand = random_unit_vec3(rng);
         let euler_pole = if pole_cand == Vec3::ZERO {
@@ -325,7 +327,7 @@ pub fn generate_plates(rng: &mut impl RngExt, config: &TectonicsConfig) -> Vec<P
         let base_elevation_offset = if var > 0.0 {
             rng.random_range(-var..var)
         } else {
-            0.0
+            (1.28 - rank_t * 0.65) * rng.random_range(0.85..1.18)
         };
         let seed_offset = rng.random_range(0.0..100.0);
         let color_hue = ((i as f32 * 137.50776) % 360.0).clamp(0.0, 360.0);
@@ -392,7 +394,7 @@ pub fn generate_plates(rng: &mut impl RngExt, config: &TectonicsConfig) -> Vec<P
         let color_hue = ((idx as f32 * 137.50776) % 360.0).clamp(0.0, 360.0);
 
         plates.push(Plate {
-            center_dir: best_dir,
+            center_dir: base_dir,
             euler_pole,
             angular_vel,
             omega: euler_pole * angular_vel,
